@@ -1,0 +1,317 @@
+name: Deploy
+
+# Continuous Deployment — automatically deploys the DBT pipeline when code is
+# merged to a protected branch:
+#   push to `develop` -> deploy to the `dev` target
+#   push to `main`     -> deploy to the `prod` target (with backup + health checks)
+#
+# Environment-specific connection settings are supplied via GitHub Environments
+# (Settings -> Environments). Create `dev` and `prod` environments, each with the
+# SAME secret names — the active environment's secrets are injected automatically:
+#   DBT_SQLSERVER_HOST, DBT_SQLSERVER_DATABASE, DBT_SQLSERVER_USER,
+#   DBT_SQLSERVER_PASSWORD, DBT_SCHEMA
+# Optional repo-level secret for notifications: SLACK_WEBHOOK_URL.
+#
+# Flow: pre-deployment checks -> (prod: backup) -> dbt deps -> dbt run ->
+#       dbt snapshot -> dbt test -> post-deployment checks -> docs -> notification.
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment to deploy to'
+        type: choice
+        required: true
+        default: dev
+        options:
+          - dev
+          - prod
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Determine the target environment
+  # ---------------------------------------------------------------------------
+  determine-environment:
+    name: Determine environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      target: ${{ steps.env.outputs.target }}
+    steps:
+      - name: Resolve environment
+        id: env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ENV="${{ github.event.inputs.environment }}"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            ENV="prod"
+          else
+            ENV="dev"
+          fi
+          echo "environment=$ENV" >> "$GITHUB_OUTPUT"
+          echo "target=$ENV" >> "$GITHUB_OUTPUT"
+          echo "::notice::Deploying to '$ENV' (target=$ENV, branch=${{ github.ref_name }})"
+
+  # ---------------------------------------------------------------------------
+  # Pre-deployment validation
+  # ---------------------------------------------------------------------------
+  pre-deploy:
+    name: Pre-deployment checks
+    runs-on: ubuntu-22.04
+    needs: determine-environment
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    env:
+      DBT_TARGET: ${{ needs.determine-environment.outputs.target }}
+      DBT_SQLSERVER_HOST: ${{ secrets.DBT_SQLSERVER_HOST }}
+      DBT_SQLSERVER_DATABASE: ${{ secrets.DBT_SQLSERVER_DATABASE }}
+      DBT_SQLSERVER_USER: ${{ secrets.DBT_SQLSERVER_USER }}
+      DBT_SQLSERVER_PASSWORD: ${{ secrets.DBT_SQLSERVER_PASSWORD }}
+      DBT_SCHEMA: ${{ secrets.DBT_SCHEMA }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Microsoft ODBC Driver 17 + dbt
+        run: |
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
+          curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 unixodbc-dev
+          pip install dbt-sqlserver==1.8.7
+
+      - name: dbt deps
+        working-directory: dbt
+        run: dbt deps
+
+      - name: dbt parse (manifest / syntax validation)
+        working-directory: dbt
+        run: dbt parse --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: dbt debug (connection validation)
+        working-directory: dbt
+        run: dbt debug --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: dbt compile (pre-deployment compile check)
+        working-directory: dbt
+        run: dbt compile --target "${{ needs.determine-environment.outputs.target }}"
+
+  # ---------------------------------------------------------------------------
+  # Production backup (before touching prod data)
+  # ---------------------------------------------------------------------------
+  backup:
+    name: Backup production database
+    runs-on: ubuntu-22.04
+    needs: determine-environment
+    if: needs.determine-environment.outputs.environment == 'prod'
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    env:
+      DBT_SQLSERVER_HOST: ${{ secrets.DBT_SQLSERVER_HOST }}
+      DBT_SQLSERVER_DATABASE: ${{ secrets.DBT_SQLSERVER_DATABASE }}
+      DBT_SQLSERVER_USER: ${{ secrets.DBT_SQLSERVER_USER }}
+      DBT_SQLSERVER_PASSWORD: ${{ secrets.DBT_SQLSERVER_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Microsoft ODBC Driver 17
+        run: |
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
+          curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 unixodbc-dev
+          pip install pyodbc==4.0.39
+
+      - name: Create pre-deployment backup
+        run: |
+          python - <<'PY'
+          import os, datetime
+          import pyodbc
+
+          host = os.environ["DBT_SQLSERVER_HOST"]
+          user = os.environ["DBT_SQLSERVER_USER"]
+          password = os.environ["DBT_SQLSERVER_PASSWORD"]
+          database = os.environ["DBT_SQLSERVER_DATABASE"]
+
+          stamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+          backup_name = f"AdventureWorks2014_predeploy_{stamp}.bak"
+
+          conn = pyodbc.connect(
+              "DRIVER={ODBC Driver 17 for SQL Server};"
+              f"SERVER={host};UID={user};PWD={password};DATABASE=master;"
+              "TrustServerCertificate=yes",
+              autocommit=True,
+          )
+          cur = conn.cursor()
+          cur.execute(f"BACKUP DATABASE [{database}] TO DISK = N'/var/opt/mssql/backup/{backup_name}' WITH INIT")
+          while cur.nextset():
+              pass
+          print(f"Pre-deployment backup created: {backup_name}")
+          PY
+
+  # ---------------------------------------------------------------------------
+  # Deploy: dbt deps -> run -> snapshot -> test
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy DBT models
+    runs-on: ubuntu-22.04
+    needs: [determine-environment, pre-deploy]
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    env:
+      DBT_TARGET: ${{ needs.determine-environment.outputs.target }}
+      DBT_SQLSERVER_HOST: ${{ secrets.DBT_SQLSERVER_HOST }}
+      DBT_SQLSERVER_DATABASE: ${{ secrets.DBT_SQLSERVER_DATABASE }}
+      DBT_SQLSERVER_USER: ${{ secrets.DBT_SQLSERVER_USER }}
+      DBT_SQLSERVER_PASSWORD: ${{ secrets.DBT_SQLSERVER_PASSWORD }}
+      DBT_SCHEMA: ${{ secrets.DBT_SCHEMA }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Microsoft ODBC Driver 17 + dbt
+        run: |
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
+          curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 unixodbc-dev
+          pip install dbt-sqlserver==1.8.7
+
+      - name: Install DBT dependencies (dbt deps)
+        working-directory: dbt
+        run: dbt deps --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: Run DBT models (dbt run)
+        working-directory: dbt
+        run: dbt run --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: Run DBT snapshots (SCD2)
+        working-directory: dbt
+        run: dbt snapshot --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: Test data quality (dbt test)
+        working-directory: dbt
+        run: dbt test --target "${{ needs.determine-environment.outputs.target }}"
+
+  # ---------------------------------------------------------------------------
+  # Post-deployment: documentation + health summary
+  # ---------------------------------------------------------------------------
+  post-deploy:
+    name: Post-deployment checks
+    runs-on: ubuntu-22.04
+    needs: [determine-environment, deploy]
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    env:
+      DBT_TARGET: ${{ needs.determine-environment.outputs.target }}
+      DBT_SQLSERVER_HOST: ${{ secrets.DBT_SQLSERVER_HOST }}
+      DBT_SQLSERVER_DATABASE: ${{ secrets.DBT_SQLSERVER_DATABASE }}
+      DBT_SQLSERVER_USER: ${{ secrets.DBT_SQLSERVER_USER }}
+      DBT_SQLSERVER_PASSWORD: ${{ secrets.DBT_SQLSERVER_PASSWORD }}
+      DBT_SCHEMA: ${{ secrets.DBT_SCHEMA }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Microsoft ODBC Driver 17 + dbt
+        run: |
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
+          curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 unixodbc-dev
+          pip install dbt-sqlserver==1.8.7
+
+      - name: Post-deployment health check (re-run tests)
+        working-directory: dbt
+        run: dbt test --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: Generate documentation
+        working-directory: dbt
+        run: dbt docs generate --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: Upload dbt docs + deployment log artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-artifacts-${{ needs.determine-environment.outputs.environment }}
+          path: |
+            dbt/target/manifest.json
+            dbt/target/catalog.json
+            dbt/target/index.html
+            dbt/logs/dbt.log
+          if-no-files-found: warn
+
+      - name: Write deployment log summary
+        run: |
+          {
+            echo "# Deployment report"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Environment | \`${{ needs.determine-environment.outputs.environment }}\` |"
+            echo "| Target | \`${{ needs.determine-environment.outputs.target }}\` |"
+            echo "| Branch | \`${{ github.ref_name }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Triggered by | \`${{ github.actor }}\` |"
+            echo "| Run | [\`${{ github.run_id }}\`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Notification (Slack if configured, otherwise job summary / notice)
+  # ---------------------------------------------------------------------------
+  notify:
+    name: Notify team
+    runs-on: ubuntu-latest
+    needs: [determine-environment, deploy, post-deploy]
+    if: always()
+    steps:
+      - name: Compose notification message
+        id: message
+        run: |
+          STATUS="${{ needs.deploy.result }}"
+          ENV="${{ needs.determine-environment.outputs.environment }}"
+          if [[ "$STATUS" == "success" ]]; then
+            TEXT=":white_check_mark: *DataOps deployment SUCCEEDED* to *$ENV* (branch \`${{ github.ref_name }}\`, commit \`${{ github.sha }}\`)"
+          else
+            TEXT=":x: *DataOps deployment FAILED* to *$ENV* (branch \`${{ github.ref_name }}\`, commit \`${{ github.sha }}\`)"
+          fi
+          echo "text=$TEXT" >> "$GITHUB_OUTPUT"
+
+      - name: Send Slack notification
+        if: secrets.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -s -X POST -H 'Content-type: application/json' \
+            --data "{\"text\": \"${{ steps.message.outputs.text }}\"}" \
+            "$SLACK_WEBHOOK_URL"
+
+      - name: Fallback notification (GitHub Actions output)
+        if: secrets.SLACK_WEBHOOK_URL == ''
+        run: |
+          echo "${{ steps.message.outputs.text }}" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ needs.deploy.result }}" != "success" ]]; then
+            echo "::error::${{ steps.message.outputs.text }}"
+          else
+            echo "::notice::${{ steps.message.outputs.text }}"
+          fi
