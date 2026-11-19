@@ -1,0 +1,224 @@
+name: CI
+
+# Continuous Integration — runs on every pull request into `develop` or `main`
+# and on manual dispatch. It validates the pull request metadata, lints Python
+# and SQL, and builds + tests the DBT models against a throwaway SQL Server.
+#
+# A PR may only be merged when every job here is green (enforce via branch
+# protection — see CONTRIBUTING.md).
+
+on:
+  pull_request:
+    branches: [develop, main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # A. Pull request metadata validation (title format, file size, conflicts)
+  # ---------------------------------------------------------------------------
+  pr-validation:
+    name: PR validation
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate PR title follows Conventional Commits
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Matches: <type>(<scope>)?: <description>  or  <type>: <description>
+          pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-zA-Z0-9_-]+\))?!?: .+'
+          if ! echo "$PR_TITLE" | grep -Eq "$pattern"; then
+            echo "::error::PR title '$PR_TITLE' does not follow Conventional Commits."
+            echo "::error::Expected format: feat(models): add gld_customer_metrics"
+            exit 1
+          fi
+          echo "PR title OK: $PR_TITLE"
+
+      - name: Check for files larger than 1 MB
+        run: |
+          big=$(git diff --name-only origin/${{ github.base_ref }}...HEAD --diff-filter=ACMR \
+                  | xargs -r -I{} sh -c 'test -f "{}" && find "{}" -size +1M -print' 2>/dev/null | sort -u)
+          if [ -n "$big" ]; then
+            echo "::error::The following changed files exceed 1 MB. Keep the repo lean:"
+            echo "$big"
+            exit 1
+          fi
+          echo "No oversized files detected."
+
+      - name: Check for merge conflicts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # A PR that cannot be merged cleanly (conflicts) is reported by the API.
+          mergeable=$(
+            curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "${{ github.api_url }}/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" \
+            | python -c "import sys,json; print(json.load(sys.stdin).get('mergeable', 'unknown'))"
+          )
+          echo "mergeable=$mergeable"
+          if [ "$mergeable" = "false" ]; then
+            echo "::error::This PR has merge conflicts. Resolve them before merging."
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # B. Python code quality (flake8 + black) for Airflow DAGs / plugins
+  # ---------------------------------------------------------------------------
+  python-quality:
+    name: Python code quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install linters
+        run: pip install flake8 black
+
+      - name: Lint with flake8
+        run: flake8 airflow/ --count --show-source --statistics
+
+      - name: Check formatting with black
+        run: black --check airflow/
+
+  # ---------------------------------------------------------------------------
+  # C. SQL linting (sqlfluff) over the DBT models
+  # ---------------------------------------------------------------------------
+  sql-quality:
+    name: SQL lint (sqlfluff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install sqlfluff
+        run: pip install sqlfluff
+
+      - name: Lint SQL models with sqlfluff
+        working-directory: dbt
+        run: sqlfluff lint models
+
+  # ---------------------------------------------------------------------------
+  # D. DBT compile + test against a throwaway SQL Server service container
+  # ---------------------------------------------------------------------------
+  dbt-build:
+    name: DBT compile + test
+    runs-on: ubuntu-22.04
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2019-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          SA_PASSWORD: 'YourStrong@Passw0rd'
+          MSSQL_PID: 'Developer'
+        ports:
+          - 1433:1433
+        volumes:
+          - ${{ github.workspace }}:/work
+    env:
+      DBT_TARGET: dev
+      DBT_SQLSERVER_HOST: localhost
+      DBT_SQLSERVER_USER: sa
+      DBT_SQLSERVER_PASSWORD: 'YourStrong@Passw0rd'
+      DBT_SQLSERVER_DATABASE: AdventureWorks2014
+      DBT_SCHEMA: dbo
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Microsoft ODBC Driver 17 + dbt
+        run: |
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
+          curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 unixodbc-dev
+          pip install dbt-sqlserver==1.8.7
+
+      - name: Download AdventureWorks2014 backup
+        run: |
+          curl -fL -o AdventureWorks2014.bak \
+            https://github.com/Microsoft/sql-server-samples/releases/download/adventureworks/AdventureWorks2014.bak
+          ls -lh AdventureWorks2014.bak
+
+      - name: Restore AdventureWorks2014 into SQL Server service container
+        run: |
+          python - <<'PY'
+          import os, sys, time
+          import pyodbc
+
+          password = os.environ["DBT_SQLSERVER_PASSWORD"]
+          conn_str = (
+              "DRIVER={ODBC Driver 17 for SQL Server};SERVER=localhost;UID=sa;"
+              f"PWD={password};DATABASE=master;TrustServerCertificate=yes"
+          )
+
+          conn = None
+          for attempt in range(30):
+              try:
+                  conn = pyodbc.connect(conn_str, autocommit=True, timeout=5)
+                  break
+              except pyodbc.Error as exc:
+                  print(f"Waiting for SQL Server... ({attempt + 1}/30) {exc}")
+                  time.sleep(5)
+          if conn is None:
+              sys.exit("SQL Server did not become ready in time.")
+
+          # The runner workspace is volume-mounted into the container at /work.
+          bak = "/work/AdventureWorks2014.bak"
+          restore = (
+              "RESTORE DATABASE AdventureWorks2014 "
+              f"FROM DISK = '{bak}' "
+              "WITH MOVE 'AdventureWorks2014_Data' TO '/var/opt/mssql/data/AdventureWorks2014.mdf', "
+              "MOVE 'AdventureWorks2014_Log' TO '/var/opt/mssql/data/AdventureWorks2014_log.ldf', "
+              "REPLACE"
+          )
+          print("Restoring AdventureWorks2014 ...")
+          cur = conn.cursor()
+          cur.execute(restore)
+          while cur.nextset():
+              pass
+          print("AdventureWorks2014 restored successfully.")
+          PY
+
+      - name: Install DBT packages
+        working-directory: dbt
+        run: dbt deps
+
+      - name: dbt parse (fast manifest / Jinja / ref validation)
+        working-directory: dbt
+        run: dbt parse --target dev
+
+      - name: dbt build (compile + run + test against the CI SQL Server)
+        working-directory: dbt
+        run: dbt build --target dev
+
+      - name: dbt docs generate (automated documentation)
+        working-directory: dbt
+        run: dbt docs generate --target dev
+
+      - name: Upload DBT docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-docs
+          path: |
+            dbt/target/manifest.json
+            dbt/target/catalog.json
+            dbt/target/index.html
+          if-no-files-found: warn
