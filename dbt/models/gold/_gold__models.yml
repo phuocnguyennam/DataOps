@@ -1,0 +1,244 @@
+version: 2
+
+models:
+  - name: gld_sales_daily
+    description: >
+      Analysis-ready daily sales KPIs per channel (grain: order_date x order_channel).
+      Use for revenue trend, channel comparison and margin dashboards.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - order_date
+            - order_channel
+    columns:
+      - name: order_date
+        description: Order date.
+        tests:
+          - not_null
+      - name: order_channel
+        description: Online or Reseller.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['Online', 'Reseller']
+      - name: total_orders
+        description: Number of distinct sales orders.
+      - name: unique_customers
+        description: Number of distinct customers who ordered.
+      - name: total_units
+        description: Total units sold.
+      - name: gross_revenue
+        description: Revenue before discount.
+      - name: discount_amount
+        description: Total discount given.
+      - name: net_revenue
+        description: Revenue after discount (sum of line totals).
+      - name: cost_amount
+        description: Total cost of goods sold (at current standard cost).
+      - name: gross_profit
+        description: net_revenue - cost_amount.
+      - name: gross_margin_pct
+        description: gross_profit / net_revenue (ratio, e.g. 0.25 = 25%).
+      - name: avg_order_value
+        description: net_revenue / total_orders.
+      - name: tax_amount
+        description: Total tax (order level).
+      - name: freight_amount
+        description: Total freight (order level).
+      - name: late_shipments
+        description: Number of orders shipped after the due date.
+
+  - name: gld_product_performance
+    description: >
+      Analysis-ready product performance (1 row per product, including unsold products).
+      Use for best-seller ranking and profitability analysis.
+    columns:
+      - name: product_id
+        description: Primary key of the product.
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              to: ref('slvr_products')
+              field: product_id
+      - name: product_name
+        description: Product name.
+      - name: product_number
+        description: Product identification number.
+      - name: product_line
+        description: Product line.
+        tests:
+          - accepted_values:
+              values: ['Road', 'Mountain', 'Touring', 'Standard', 'Unknown']
+      - name: product_type
+        description: Finished Good or Component.
+        tests:
+          - accepted_values:
+              values: ['Finished Good', 'Component']
+      - name: price_tier
+        description: List price band.
+        tests:
+          - accepted_values:
+              values: ['Not For Sale', 'Low', 'Mid', 'Premium']
+      - name: is_active
+        description: 1 if the product is still on sale.
+        tests:
+          - accepted_values:
+              values: [0, 1]
+      - name: list_price
+        description: Current list price.
+      - name: standard_cost
+        description: Current standard cost.
+      - name: total_orders
+        description: Number of distinct orders containing the product.
+      - name: total_units
+        description: Total units sold.
+      - name: net_revenue
+        description: Revenue after discount.
+      - name: discount_amount
+        description: Total discount given on the product.
+      - name: cost_amount
+        description: Total cost of goods sold.
+      - name: gross_profit
+        description: net_revenue - cost_amount.
+      - name: gross_margin_pct
+        description: gross_profit / net_revenue (NULL if no sales).
+      - name: avg_selling_price
+        description: Average realised price per unit = net_revenue / total_units.
+      - name: first_sale_date
+        description: Date of first sale (NULL if never sold).
+      - name: last_sale_date
+        description: Date of last sale (NULL if never sold).
+      - name: has_sales
+        description: 1 if the product has at least one sale.
+        tests:
+          - accepted_values:
+              values: [0, 1]
+      - name: revenue_rank
+        description: Rank of the product by net revenue (1 = highest).
+
+  - name: gld_customer_metrics
+    description: >
+      Analysis-ready customer lifetime value (LTV) and segmentation mart (1 row per customer).
+      Captures order frequency, total spending, margin contribution, recency, and segment classification.
+    columns:
+      - name: customer_id
+        description: Primary key of the customer record.
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              to: ref('slvr_customers')
+              field: customer_id
+      - name: account_number
+        description: Customer account number.
+        tests:
+          - unique
+          - not_null
+      - name: full_name
+        description: Formatted full name of customer or store name.
+      - name: customer_type
+        description: Retail Individual vs Wholesale Store.
+        tests:
+          - accepted_values:
+              values: ['Retail Individual', 'Wholesale Store', 'Other']
+      - name: territory_id
+        description: Sales territory identifier.
+      - name: email_promotion
+        description: Email promotion preference channel.
+        tests:
+          - accepted_values:
+              values: ['No', 'Direct Channel', 'Partner Channel', 'Unknown']
+      - name: total_orders
+        description: Total distinct sales orders placed.
+      - name: total_units_purchased
+        description: Total product units purchased across all orders.
+      - name: lifetime_revenue
+        description: Total net revenue contributed by the customer.
+      - name: lifetime_discount_amount
+        description: Total discount value received by the customer.
+      - name: lifetime_gross_profit
+        description: Total gross profit contributed by the customer.
+      - name: lifetime_margin_pct
+        description: Gross margin percentage contributed by the customer.
+      - name: avg_order_value
+        description: Average net revenue per order (AOV).
+      - name: first_order_date
+        description: Date of first purchase (NULL if no purchase).
+      - name: last_order_date
+        description: Date of most recent purchase (NULL if no purchase).
+      - name: days_since_last_order
+        description: Days between most recent purchase and last order in system.
+      - name: customer_segment
+        description: "Customer segment: 'VIP Customer', 'Loyal Customer', 'Regular Customer', 'One-Time Buyer', 'Prospect / No Purchase'."
+        tests:
+          - accepted_values:
+              values: ['VIP Customer', 'Loyal Customer', 'Regular Customer', 'One-Time Buyer', 'Prospect / No Purchase']
+      - name: has_orders
+        description: 1 if the customer has placed at least one order.
+        tests:
+          - accepted_values:
+              values: [0, 1]
+
+  - name: gld_monthly_sales_summary
+    description: >
+      Executive-level monthly sales performance mart (grain: order_year x order_month).
+      Combines financial aggregates, channel shares, and month-over-month (MoM) revenue growth.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - order_year
+            - order_month
+    columns:
+      - name: order_year
+        description: Calendar year of the orders.
+        tests:
+          - not_null
+      - name: order_month
+        description: Calendar month (1-12) of the orders.
+        tests:
+          - not_null
+          - accepted_values:
+              values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+      - name: year_month_label
+        description: Formatted label for display (e.g. '2013-05').
+      - name: total_orders
+        description: Total number of orders placed in the month.
+      - name: online_orders
+        description: Total online customer orders.
+      - name: reseller_orders
+        description: Total reseller / sales person orders.
+      - name: unique_customers
+        description: Number of unique customers who purchased in the month.
+      - name: total_units_sold
+        description: Total units of products sold.
+      - name: gross_revenue
+        description: Revenue before discounts.
+      - name: discount_amount
+        description: Total discounts granted.
+      - name: net_revenue
+        description: Total net revenue earned in the month.
+      - name: cost_amount
+        description: Total cost of goods sold.
+      - name: gross_profit
+        description: Gross profit for the month = net_revenue - cost_amount.
+      - name: gross_margin_pct
+        description: Gross margin ratio for the month.
+      - name: avg_order_value
+        description: Average order value in the month.
+      - name: online_revenue
+        description: Revenue from online orders.
+      - name: reseller_revenue
+        description: Revenue from reseller orders.
+      - name: online_revenue_share_pct
+        description: Share of net revenue generated online.
+      - name: tax_amount
+        description: Total sales tax collected in the month.
+      - name: freight_amount
+        description: Total shipping/freight charged in the month.
+      - name: late_shipments
+        description: Total orders shipped after due date in the month.
+      - name: prior_month_net_revenue
+        description: Net revenue of the immediately preceding month (from window LAG).
+      - name: mom_revenue_growth_pct
+        description: Month-over-month net revenue growth percentage.
