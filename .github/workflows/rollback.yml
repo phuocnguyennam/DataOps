@@ -1,0 +1,121 @@
+name: Rollback
+
+# Manual rollback — re-deploys a previous known-good version of the DBT models
+# to a chosen environment. Two complementary strategies are supported:
+#
+#   Strategy A (default): "State-aware rollback" using dbt state.
+#       Compares the last successful run (stored in the target's `manifest.json`
+#       artifact) against the rollback ref and reverts only what changed.
+#
+#   Strategy B: "Full redeploy" of a previous git ref.
+#       Checks out `ref` (tag / branch / commit) and runs the models from there.
+#
+# See DEPLOYMENT.md -> "Rollback procedures" for the full runbook.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to roll back'
+        type: choice
+        required: true
+        default: dev
+        options:
+          - dev
+          - prod
+      ref:
+        description: 'Git ref to roll back to (tag, branch, or commit SHA), e.g. v1.0.0'
+        type: string
+        required: true
+      strategy:
+        description: 'Rollback strategy'
+        type: choice
+        required: true
+        default: state-aware
+        options:
+          - state-aware
+          - full-redeploy
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  rollback:
+    name: Rollback ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-22.04
+    environment: ${{ github.event.inputs.environment }}
+    env:
+      DBT_TARGET: ${{ github.event.inputs.environment }}
+      DBT_SQLSERVER_HOST: ${{ secrets.DBT_SQLSERVER_HOST }}
+      DBT_SQLSERVER_DATABASE: ${{ secrets.DBT_SQLSERVER_DATABASE }}
+      DBT_SQLSERVER_USER: ${{ secrets.DBT_SQLSERVER_USER }}
+      DBT_SQLSERVER_PASSWORD: ${{ secrets.DBT_SQLSERVER_PASSWORD }}
+      DBT_SCHEMA: ${{ secrets.DBT_SCHEMA }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Microsoft ODBC Driver 17 + dbt
+        run: |
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
+          curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 unixodbc-dev
+          pip install dbt-sqlserver==1.8.7
+
+      - name: Install DBT dependencies
+        working-directory: dbt
+        run: dbt deps --target "${{ github.event.inputs.environment }}"
+
+      - name: Download prior state (state-aware rollback)
+        id: state
+        if: github.event.inputs.strategy == 'state-aware'
+        uses: actions/download-artifact@v4
+        with:
+          name: deploy-artifacts-${{ github.event.inputs.environment }}
+          path: dbt/state
+        continue-on-error: true
+
+      - name: State-aware rollback (revert changed models)
+        if: github.event.inputs.strategy == 'state-aware'
+        working-directory: dbt
+        run: |
+          if [ -f state/manifest.json ]; then
+            dbt run --target "${{ github.event.inputs.environment }}" \
+              --select state:modified+ --defer --state state
+            dbt test --target "${{ github.event.inputs.environment }}" \
+              --select state:modified+ --defer --state state
+          else
+            echo "::warning::No prior state artifact found; falling back to full redeploy."
+            dbt run --target "${{ github.event.inputs.environment }}" --full-refresh
+            dbt test --target "${{ github.event.inputs.environment }}"
+          fi
+
+      - name: Full redeploy rollback (run models from the target ref)
+        if: github.event.inputs.strategy == 'full-redeploy'
+        working-directory: dbt
+        run: |
+          dbt run --target "${{ github.event.inputs.environment }}" --full-refresh
+          dbt test --target "${{ github.event.inputs.environment }}"
+
+      - name: Rollback summary
+        if: always()
+        run: |
+          {
+            echo "# Rollback report"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Environment | \`${{ github.event.inputs.environment }}\` |"
+            echo "| Rollback ref | \`${{ github.event.inputs.ref }}\` |"
+            echo "| Strategy | \`${{ github.event.inputs.strategy }}\` |"
+            echo "| Status | \`${{ job.status }}\` |"
+            echo "| Run | [\`${{ github.run_id }}\`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+          } >> "$GITHUB_STEP_SUMMARY"
