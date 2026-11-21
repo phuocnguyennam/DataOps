@@ -21,8 +21,14 @@ models:
         description: Date the order was shipped to the customer. NULL if not yet shipped.
       - name: order_status_code
         description: "Raw order status: 1 In process, 2 Approved, 3 Backordered, 4 Rejected, 5 Shipped, 6 Cancelled."
+        tests:
+          - accepted_values:
+              values: [1, 2, 3, 4, 5, 6]
       - name: is_online_order
         description: 1 = order placed online by the customer, 0 = placed by a sales person (reseller).
+        tests:
+          - accepted_values:
+              values: [0, 1]
       - name: sales_order_number
         description: Business identifier of the sales order (e.g. SO43659).
       - name: purchase_order_number
@@ -31,8 +37,17 @@ models:
         description: Financial accounting number reference.
       - name: customer_id
         description: Customer identifier (FK to Sales.Customer).
+        tests:
+          - not_null
+          - relationships:
+              to: ref('brnz_customer')
+              field: customer_id
       - name: sales_person_id
         description: Sales person who created the order. NULL for online orders.
+        tests:
+          - relationships:
+              to: ref('brnz_person')
+              field: person_id
       - name: territory_id
         description: Territory in which the sale was made.
       - name: ship_method_id
@@ -47,7 +62,6 @@ models:
         description: Total due from customer = subtotal + tax + freight.
       - name: modified_at
         description: Date and time the source record was last updated.
-
   - name: brnz_sales_order_detail
     description: >
       Bronze staging of Sales.SalesOrderDetail. One row per order line (1:1 with source).
@@ -60,8 +74,18 @@ models:
           - not_null
       - name: sales_order_id
         description: Sales order the line belongs to (FK to brnz_sales_order_header).
+        tests:
+          - not_null
+          - relationships:
+              to: ref('brnz_sales_order_header')
+              field: sales_order_id
       - name: product_id
         description: Product sold (FK to brnz_product).
+        tests:
+          - not_null
+          - relationships:
+              to: ref('brnz_product')
+              field: product_id
       - name: special_offer_id
         description: Promotional / special offer identifier applied to the line.
       - name: carrier_tracking_number
@@ -94,8 +118,14 @@ models:
         description: Unique product identification number (e.g. BK-R93R-62).
       - name: is_manufactured_in_house
         description: 1 = product is manufactured in-house, 0 = purchased.
+        tests:
+          - accepted_values:
+              values: [0, 1]
       - name: is_finished_good
         description: 1 = product is a salable finished good, 0 = component / not salable.
+        tests:
+          - accepted_values:
+              values: [0, 1]
       - name: color
         description: Product color. NULL when not applicable.
       - name: safety_stock_level
@@ -118,10 +148,19 @@ models:
         description: Number of days required to manufacture the product.
       - name: product_line_code
         description: "Raw product line code: R Road, M Mountain, T Touring, S Standard. NULL if not applicable."
+        tests:
+          - accepted_values:
+              values: ['R', 'M', 'T', 'S']
       - name: class_code
         description: "Raw class code: H High, M Medium, L Low."
+        tests:
+          - accepted_values:
+              values: ['H', 'M', 'L']
       - name: style_code
         description: "Raw style code: W Womens, M Mens, U Universal."
+        tests:
+          - accepted_values:
+              values: ['W', 'M', 'U']
       - name: product_subcategory_id
         description: Product subcategory identifier. NULL for components.
       - name: product_model_id
@@ -148,6 +187,10 @@ models:
           - not_null
       - name: person_id
         description: Foreign key to Person.Person. Populated for retail consumers, NULL for store accounts.
+        tests:
+          - relationships:
+              to: ref('brnz_person')
+              field: person_id
       - name: store_id
         description: Foreign key to Sales.Store. Populated for wholesale store accounts, NULL for consumers.
       - name: territory_id
@@ -156,8 +199,14 @@ models:
         description: Customer account identifier (e.g. AW00000001).
       - name: is_individual
         description: 1 if the customer is an individual retail consumer (person_id is not null).
+        tests:
+          - accepted_values:
+              values: [0, 1]
       - name: is_store_customer
         description: 1 if the customer is a wholesale store / corporate account (store_id is not null).
+        tests:
+          - accepted_values:
+              values: [0, 1]
       - name: modified_at
         description: Date and time the source record was last updated.
 
@@ -174,6 +223,9 @@ models:
           - not_null
       - name: person_type_code
         description: "Type of person: SC Store Contact, IN Individual Customer, SP Sales Person, EM Employee, VC Vendor Contact, GC General Contact."
+        tests:
+          - accepted_values:
+              values: ['SC', 'IN', 'SP', 'EM', 'VC', 'GC']
       - name: title
         description: Primary title (e.g. Mr., Ms.). NULL if none.
       - name: first_name
@@ -186,5 +238,8 @@ models:
         description: Name suffix (e.g. Jr., Sr., III). NULL if none.
       - name: email_promotion_code
         description: 0 = does not receive promotions, 1 = receives from AW, 2 = receives from AW and partners.
+        tests:
+          - accepted_values:
+              values: [0, 1, 2]
       - name: modified_at
         description: Date and time the source record was last updated.

@@ -8,6 +8,10 @@ name: CI
 # protection — see CONTRIBUTING.md).
 
 on:
+<<<<<<< HEAD
+  pull_request:
+    branches: [develop, main]
+=======
   push:
     branches:
       - 'feature/**'
@@ -16,6 +20,7 @@ on:
       - develop
       - main
       - 'feature/**'
+>>>>>>> origin/feature/airflow-and-tests
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
@@ -81,7 +86,11 @@ jobs:
   # ---------------------------------------------------------------------------
   python-quality:
     name: Python code quality
+<<<<<<< HEAD
+    runs-on: ubuntu-latest
+=======
     runs-on: ubuntu-22.04
+>>>>>>> origin/feature/airflow-and-tests
     steps:
       - uses: actions/checkout@v4
 
@@ -103,7 +112,11 @@ jobs:
   # ---------------------------------------------------------------------------
   sql-quality:
     name: SQL lint (sqlfluff)
+<<<<<<< HEAD
+    runs-on: ubuntu-latest
+=======
     runs-on: ubuntu-22.04
+>>>>>>> origin/feature/airflow-and-tests
     steps:
       - uses: actions/checkout@v4
 
@@ -115,7 +128,12 @@ jobs:
         run: pip install sqlfluff
 
       - name: Lint SQL models with sqlfluff
+<<<<<<< HEAD
+        working-directory: dbt
+        run: sqlfluff lint models
+=======
         run: sqlfluff lint --config .sqlfluff dbt/models
+>>>>>>> origin/feature/airflow-and-tests
 
   # ---------------------------------------------------------------------------
   # D. DBT compile + test against a throwaway SQL Server service container
@@ -150,6 +168,12 @@ jobs:
 
       - name: Install Microsoft ODBC Driver 17 + dbt
         run: |
+<<<<<<< HEAD
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
+          curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 unixodbc-dev
+=======
           if ! dpkg -s msodbcsql17 >/dev/null 2>&1; then
             sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/mssql-release.list
             curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /usr/share/keyrings/microsoft-prod.gpg
@@ -159,13 +183,17 @@ jobs:
           fi
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends unixodbc-dev
+>>>>>>> origin/feature/airflow-and-tests
           pip install dbt-sqlserver==1.8.7
 
       - name: Download AdventureWorks2014 backup
         run: |
           curl -fL -o AdventureWorks2014.bak \
             https://github.com/Microsoft/sql-server-samples/releases/download/adventureworks/AdventureWorks2014.bak
+<<<<<<< HEAD
+=======
           chmod 644 AdventureWorks2014.bak
+>>>>>>> origin/feature/airflow-and-tests
           ls -lh AdventureWorks2014.bak
 
       - name: Restore AdventureWorks2014 into SQL Server service container

@@ -1,38 +1,299 @@
 from datetime import datetime, timedelta
+import os
+import json
+import logging
+from urllib import request as urllib_request
+from urllib.error import URLError
+
 from airflow import DAG
 from airflow.operators.bash import BashOperator
+from airflow.models import Variable
+from airflow.utils.email import send_email
 
+log = logging.getLogger(__name__)
+
+# ==============================================================================
+# DAG DOCUMENTATION (Markdown render in Airflow UI)
+# ==============================================================================
+DAG_DOC_MD = """
+# DataOps DBT Pipeline with Quality Gates
+## Automated AdventureWorks Transformation & Quality Assurance
+
+This pipeline orchestrates the end-to-end DBT transformation pipeline across
+three architectural layers:
+- **Bronze Layer (Raw Ingestion)**: Views extracting from OLTP source schemas
+  (`Sales`, `Production`, `Person`).
+- **Silver Layer (Business Entities & Facts)**: Tables with cleaned,
+  deduplicated, and business-logic enriched data.
+- **Gold Layer (Analytics Marts)**: Aggregated analytical marts ready for
+  reporting and dashboards.
+
+### Quality Gate Strategy:
+1. **Source Freshness Check**: Verifies that OLTP source data is not stale
+   before transformations.
+2. **Bronze Quality Gate**: Runs and tests models selected by `tag:bronze`.
+3. **Silver Quality Gate**: Runs and tests models selected by `tag:silver`.
+4. **Gold Quality Gate**: Runs and tests models selected by `tag:gold`.
+5. **Reconciliation Test**: Checks Silver order lines against Gold monthly
+   marts.
+6. **Docs Generation**: Automatically refreshes DBT catalog and lineage documentation.
+
+### Notification Channels
+Configure these in Airflow under Admin > Variables and Connections:
+- **Email**: Set comma-separated `ALERT_EMAIL_TO` and configure `smtp_default`.
+- **Webhook**: Set `ALERT_WEBHOOK_URL` to a Discord, Slack, or Teams URL.
+- Both channels are optional. Without configuration, alerts are logged.
+
+*A failure at any quality gate stops the pipeline.*
+"""
+
+# ==============================================================================
+# DYNAMIC CONTAINER RESOLVER (No Hardcoded Container Names)
+# ==============================================================================
+DBT_CONTAINER_FILTER = Variable.get(
+    "DBT_CONTAINER_NAME",
+    default_var=os.getenv("DBT_CONTAINER_NAME", "dbt"),
+)
+
+
+def dbt_command(command: str) -> str:
+    """
+    Constructs a robust bash command executing dbt inside the active dbt container.
+    Dynamically fetches container ID to avoid hardcoded docker-compose project names.
+    """
+    return (
+        f'CONTAINER_ID=$(docker ps -qf "name={DBT_CONTAINER_FILTER}" | head -n 1); '
+        f'if [ -z "$CONTAINER_ID" ]; then '
+        f"  echo \"ERROR: DBT container matching '{DBT_CONTAINER_FILTER}' "
+        f'was not found!"; exit 1; '
+        f"fi; "
+        f'echo ">>> Executing: dbt {command} inside container: $CONTAINER_ID"; '
+        f"docker exec $CONTAINER_ID dbt {command}"
+    )
+
+
+# ==============================================================================
+# FAILURE NOTIFICATION CALLBACK
+# Sends notifications through Airflow SMTP and/or a webhook.
+# Configure via Airflow UI > Admin > Variables:
+#   - ALERT_EMAIL_TO       : "you@example.com,team@example.com"
+#   - ALERT_WEBHOOK_URL    : Webhook URL for Discord, Slack, or Teams.
+# Configure SMTP via Airflow UI > Admin > Connections > smtp_default.
+# ==============================================================================
+def task_failure_alert(context):
+    """
+    Triggered when a task exhausts all retries and fails.
+    Sends notifications to Email and/or Webhook based on configured Airflow Variables.
+    Falls back to log-only if Variables are not set.
+    """
+    task_instance = context.get("task_instance")
+    dag_id = context.get("dag").dag_id
+    task_id = task_instance.task_id
+    execution_date = context.get("execution_date")
+    log_url = task_instance.log_url
+    exception = context.get("exception")
+
+    # Compose a human-readable alert body.
+    alert_text = (
+        f"[DATAOPS PIPELINE FAILURE]\n"
+        f"Pipeline   : {dag_id}\n"
+        f"Failed Task: {task_id}\n"
+        f"Run Date   : {execution_date}\n"
+        f"Status     : FAILED (Retries Exhausted)\n"
+        f"Exception  : {exception}\n"
+        f"Log URL    : {log_url}\n"
+        f"Action     : Review DBT test output and fix schema / data discrepancies."
+    )
+
+    log.error("=" * 80)
+    log.error(alert_text)
+    log.error("=" * 80)
+
+    # Channel 1: Email via Airflow SMTP.
+    # Set Variable ALERT_EMAIL_TO = "addr1@example.com,addr2@example.com"
+    # Set Connection smtp_default with your SMTP server credentials.
+    try:
+        email_to_raw = Variable.get("ALERT_EMAIL_TO", default_var="")
+        if email_to_raw.strip():
+            recipients = [e.strip() for e in email_to_raw.split(",") if e.strip()]
+            html_body = f"""
+            <h2>DataOps Pipeline Failure</h2>
+            <table border="1" cellpadding="6" cellspacing="0">
+              <tr><th>Pipeline</th><td>{dag_id}</td></tr>
+              <tr><th>Failed Task</th><td><b>{task_id}</b></td></tr>
+              <tr><th>Execution Date</th><td>{execution_date}</td></tr>
+              <tr>
+                <th>Status</th>
+                <td style="color:red;"><b>FAILED (Retries Exhausted)</b></td>
+              </tr>
+              <tr><th>Exception</th><td><code>{exception}</code></td></tr>
+              <tr><th>Log URL</th><td><a href="{log_url}">{log_url}</a></td></tr>
+            </table>
+            <p>
+              <i>Review DBT test logs and resolve schema or data discrepancies.</i>
+            </p>
+            """
+            send_email(
+                to=recipients,
+                subject=f"[AIRFLOW ALERT] {dag_id} - Task {task_id} FAILED",
+                html_content=html_body,
+            )
+            log.info("Failure alert email sent to: %s", recipients)
+        else:
+            log.info("ALERT_EMAIL_TO missing; skipping email notification.")
+    except Exception as email_err:
+        log.warning(
+            "Email notification failed; check smtp_default: %s",
+            email_err,
+        )
+
+    # Channel 2: Webhook notification.
+    # Set Variable ALERT_WEBHOOK_URL with the full webhook URL.
+    # Discord  : https://discord.com/api/webhooks/<id>/<token>
+    # Slack    : https://hooks.slack.com/services/...
+    # Teams    : https://outlook.office.com/webhook/...
+    try:
+        webhook_url = Variable.get("ALERT_WEBHOOK_URL", default_var="")
+        if webhook_url.strip():
+            # Discord uses {"content": "..."} ; Slack/Teams use {"text": "..."}
+            # We send both keys so the same payload works for all three platforms.
+            payload = json.dumps(
+                {
+                    "content": alert_text,  # Discord
+                    "text": alert_text,  # Slack / Teams
+                }
+            ).encode("utf-8")
+
+            req = urllib_request.Request(
+                url=webhook_url.strip(),
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib_request.urlopen(req, timeout=10) as resp:
+                log.info("Webhook notification sent (HTTP %s).", resp.status)
+        else:
+            log.info("ALERT_WEBHOOK_URL missing; skipping webhook notification.")
+    except URLError as webhook_err:
+        log.warning(
+            "Webhook failed; check ALERT_WEBHOOK_URL: %s",
+            webhook_err,
+        )
+    except Exception as webhook_err:
+        log.warning("Unexpected webhook error: %s", webhook_err)
+
+
+# ==============================================================================
+# DEFAULT ARGS & DAG DEFINITION
+# ==============================================================================
 default_args = {
-    "owner": "airflow",
+    "owner": "dataops-team",
     "depends_on_past": False,
-    "email_on_failure": False,
+    "email_on_failure": False,  # Handled manually in task_failure_alert
     "email_on_retry": False,
-    "retries": 1,
+    "retries": 3,
     "retry_delay": timedelta(minutes=5),
+    "on_failure_callback": task_failure_alert,
 }
 
-dag = DAG(
-    "dbt_transform",
+with DAG(
+    "dbt_transform_pipeline",
     default_args=default_args,
-    description="Run dbt models",
-    schedule_interval=timedelta(minutes=5),
+    description=(
+        "Production DataOps DBT pipeline with quality gates and automated tests"
+    ),
+    doc_md=DAG_DOC_MD,
+    schedule_interval="@daily",
     start_date=datetime(2024, 1, 1),
     catchup=False,
-    tags=["dbt", "sqlserver"],
-)
+    tags=["dataops", "dbt", "quality-gate", "adventureworks"],
+) as dag:
 
-# Define tasks using BashOperator to execute dbt commands in the dbt container
-dbt_run = BashOperator(
-    task_id="dbt_run",
-    bash_command="docker exec dbt_airflow_project-dbt-1 dbt run",
-    dag=dag,
-)
+    # 0. Install DBT dependencies
+    dbt_deps = BashOperator(
+        task_id="dbt_deps",
+        bash_command=dbt_command("deps"),
+        doc_md="Installs DBT packages declared in packages.yml (e.g. dbt_utils).",
+    )
 
-dbt_test = BashOperator(
-    task_id="dbt_test",
-    bash_command="docker exec dbt_airflow_project-dbt-1 dbt test",
-    dag=dag,
-)
+    # 1. Source freshness check
+    dbt_freshness = BashOperator(
+        task_id="dbt_source_freshness",
+        bash_command=dbt_command("source freshness"),
+        doc_md="Verifies freshness thresholds across all declared OLTP sources.",
+    )
 
-# Set task dependencies
-dbt_run >> dbt_test
+    # 2. Bronze layer: run then test (Quality Gate 1).
+    dbt_run_bronze = BashOperator(
+        task_id="dbt_run_bronze",
+        bash_command=dbt_command("run --select tag:bronze"),
+        doc_md="Materializes Bronze raw staging views from source tables.",
+    )
+    dbt_test_bronze = BashOperator(
+        task_id="dbt_test_bronze",
+        bash_command=dbt_command("test --select tag:bronze"),
+        doc_md="Quality Gate 1: uniqueness, not_null, accepted_values on Bronze views.",
+    )
+
+    # 3. Silver layer: run then test (Quality Gate 2).
+    dbt_run_silver = BashOperator(
+        task_id="dbt_run_silver",
+        bash_command=dbt_command("run --select tag:silver"),
+        doc_md="Transforms Bronze views into cleaned Silver tables.",
+    )
+    dbt_test_silver = BashOperator(
+        task_id="dbt_test_silver",
+        bash_command=dbt_command(
+            "test --select tag:silver --exclude tag:gold --exclude test_type:singular"
+        ),
+        doc_md=(
+            "Quality Gate 2: relationships and custom generic tests "
+            "(is_positive, no_future_dates, valid_date_range)."
+        ),
+    )
+
+    # 4. Gold layer: run then test (Quality Gate 3).
+    dbt_run_gold = BashOperator(
+        task_id="dbt_run_gold",
+        bash_command=dbt_command("run --select tag:gold"),
+        doc_md="Materializes analytical Gold mart tables.",
+    )
+    dbt_test_gold = BashOperator(
+        task_id="dbt_test_gold",
+        bash_command=dbt_command("test --select tag:gold"),
+        doc_md=(
+            "Quality Gate 3: composite key uniqueness and metric integrity "
+            "on Gold marts."
+        ),
+    )
+
+    # 5. Cross-layer reconciliation (singular test)
+    dbt_test_reconciliation = BashOperator(
+        task_id="dbt_test_reconciliation",
+        bash_command=dbt_command("test --select test_type:singular"),
+        doc_md=(
+            "Reconciliation Gate: Silver revenue must match Gold monthly "
+            "summary (tolerance 1.0)."
+        ),
+    )
+
+    # 6. Refresh documentation catalog
+    dbt_docs = BashOperator(
+        task_id="dbt_docs_generate",
+        bash_command=dbt_command("docs generate"),
+        doc_md="Generates updated DBT lineage catalog and documentation.",
+    )
+
+    # Pipeline dependency graph: strict linear quality-gate chain.
+    (
+        dbt_deps
+        >> dbt_freshness
+        >> dbt_run_bronze
+        >> dbt_test_bronze
+        >> dbt_run_silver
+        >> dbt_test_silver
+        >> dbt_run_gold
+        >> dbt_test_gold
+        >> dbt_test_reconciliation
+        >> dbt_docs
+    )
