@@ -19,6 +19,8 @@ models:
         description: Online or Reseller.
         tests:
           - not_null
+          - accepted_values:
+              values: ['Online', 'Reseller']
       - name: total_orders
         description: Number of distinct sales orders.
       - name: unique_customers
@@ -56,18 +58,33 @@ models:
         tests:
           - unique
           - not_null
+          - relationships:
+              to: ref('slvr_products')
+              field: product_id
       - name: product_name
         description: Product name.
       - name: product_number
         description: Product identification number.
       - name: product_line
         description: Product line.
+        tests:
+          - accepted_values:
+              values: ['Road', 'Mountain', 'Touring', 'Standard', 'Unknown']
       - name: product_type
         description: Finished Good or Component.
+        tests:
+          - accepted_values:
+              values: ['Finished Good', 'Component']
       - name: price_tier
         description: List price band.
+        tests:
+          - accepted_values:
+              values: ['Not For Sale', 'Low', 'Mid', 'Premium']
       - name: is_active
         description: 1 if the product is still on sale.
+        tests:
+          - accepted_values:
+              values: [0, 1]
       - name: list_price
         description: Current list price.
       - name: standard_cost
@@ -94,6 +111,9 @@ models:
         description: Date of last sale (NULL if never sold).
       - name: has_sales
         description: 1 if the product has at least one sale.
+        tests:
+          - accepted_values:
+              values: [0, 1]
       - name: revenue_rank
         description: Rank of the product by net revenue (1 = highest).
 
@@ -107,6 +127,9 @@ models:
         tests:
           - unique
           - not_null
+          - relationships:
+              to: ref('slvr_customers')
+              field: customer_id
       - name: account_number
         description: Customer account number.
         tests:
@@ -116,10 +139,16 @@ models:
         description: Formatted full name of customer or store name.
       - name: customer_type
         description: Retail Individual vs Wholesale Store.
+        tests:
+          - accepted_values:
+              values: ['Retail Individual', 'Wholesale Store', 'Other']
       - name: territory_id
         description: Sales territory identifier.
       - name: email_promotion
         description: Email promotion preference channel.
+        tests:
+          - accepted_values:
+              values: ['No', 'Direct Channel', 'Partner Channel', 'Unknown']
       - name: total_orders
         description: Total distinct sales orders placed.
       - name: total_units_purchased
@@ -147,6 +176,9 @@ models:
               values: ['VIP Customer', 'Loyal Customer', 'Regular Customer', 'One-Time Buyer', 'Prospect / No Purchase']
       - name: has_orders
         description: 1 if the customer has placed at least one order.
+        tests:
+          - accepted_values:
+              values: [0, 1]
 
   - name: gld_monthly_sales_summary
     description: >
@@ -166,6 +198,8 @@ models:
         description: Calendar month (1-12) of the orders.
         tests:
           - not_null
+          - accepted_values:
+              values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
       - name: year_month_label
         description: Formatted label for display (e.g. '2013-05').
       - name: total_orders

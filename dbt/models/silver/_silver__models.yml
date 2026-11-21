@@ -33,14 +33,29 @@ models:
               values: ['Road', 'Mountain', 'Touring', 'Standard', 'Unknown']
       - name: product_class
         description: Decoded class (High, Medium, Low, Unknown).
+        tests:
+          - accepted_values:
+              values: ['High', 'Medium', 'Low', 'Unknown']
       - name: product_style
         description: Decoded style (Women, Men, Universal, Unknown).
+        tests:
+          - accepted_values:
+              values: ['Women', 'Men', 'Universal', 'Unknown']
       - name: product_type
         description: "'Finished Good' if salable, otherwise 'Component'."
+        tests:
+          - accepted_values:
+              values: ['Finished Good', 'Component']
       - name: price_tier
         description: "List price band: Not For Sale (0), Low (<100), Mid (<1000), Premium (>=1000)."
+        tests:
+          - accepted_values:
+              values: ['Not For Sale', 'Low', 'Mid', 'Premium']
       - name: is_active
         description: 1 if the product is still on sale (no sell end date and not discontinued).
+        tests:
+          - accepted_values:
+              values: [0, 1]
       - name: sell_start_date
         description: Date the product was available for sale.
       - name: sell_end_date
@@ -90,8 +105,14 @@ models:
               values: ['No', 'Direct Channel', 'Partner Channel', 'Unknown']
       - name: is_individual
         description: 1 for retail consumer accounts.
+        tests:
+          - accepted_values:
+              values: [0, 1]
       - name: is_store_customer
         description: 1 for wholesale store accounts.
+        tests:
+          - accepted_values:
+              values: [0, 1]
       - name: modified_at
         description: Last update timestamp.
 
@@ -126,14 +147,29 @@ models:
               field: product_id
       - name: customer_id
         description: Customer who placed the order.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('slvr_customers')
+              field: customer_id
       - name: territory_id
         description: Sales territory.
       - name: order_date
         description: Order date (date only).
+        tests:
+          - not_null
+          - no_future_dates
+          - valid_date_range:
+              min_date: '2010-01-01'
+              max_date: '2030-12-31'
       - name: order_year
         description: Calendar year of the order.
       - name: order_month
         description: Calendar month (1-12) of the order.
+        tests:
+          - not_null
+          - accepted_values:
+              values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
       - name: order_channel
         description: Online (customer self-service) or Reseller (via sales person).
         tests:
@@ -146,8 +182,15 @@ models:
               values: ['In Process', 'Approved', 'Backordered', 'Shipped']
       - name: order_qty
         description: Quantity ordered.
+        tests:
+          - not_null
+          - is_positive
       - name: unit_price
         description: Selling price per unit.
+        tests:
+          - not_null
+          - is_positive:
+              allow_zero: true
       - name: unit_price_discount_pct
         description: Discount ratio (0 - 1).
       - name: gross_amount
@@ -166,6 +209,9 @@ models:
         description: net_amount - cost_amount.
       - name: has_discount
         description: 1 if a discount was applied to the line.
+        tests:
+          - accepted_values:
+              values: [0, 1]
 
   - name: slvr_sales_orders
     description: >
@@ -198,6 +244,9 @@ models:
               values: ['Online', 'Reseller']
       - name: order_status
         description: Decoded order status.
+        tests:
+          - accepted_values:
+              values: ['In Process', 'Approved', 'Backordered', 'Shipped']
       - name: order_date
         description: Order date.
       - name: due_date
@@ -208,6 +257,9 @@ models:
         description: Days between order date and ship date.
       - name: is_late_shipment
         description: 1 if shipped after the due date.
+        tests:
+          - accepted_values:
+              values: [0, 1]
       - name: line_count
         description: Number of order lines.
       - name: total_units
@@ -224,3 +276,6 @@ models:
         description: Sum of line totals from order details.
       - name: is_subtotal_reconciled
         description: Data-quality flag, 1 if header subtotal matches the sum of line totals (tolerance 0.01).
+        tests:
+          - accepted_values:
+              values: [0, 1]
