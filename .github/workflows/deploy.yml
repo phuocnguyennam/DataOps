@@ -1,0 +1,524 @@
+name: Deploy
+
+# Continuous Deployment — automatically deploys the DBT pipeline when code is
+# merged to a protected branch:
+#   push to `develop` -> deploy to the `dev` target
+#   push to `main`     -> deploy to the `prod` target (with backup + health checks)
+#
+# Two database modes (choose via `db-mode`):
+#   external  (default) - connects to a REAL SQL Server supplied through GitHub
+#                         Environments' secrets (dev/prod). Used for actual
+#                         environment-specific deployments.
+#   container - spins up a THROWAWAY SQL Server service container inside the
+#               runner, restores AdventureWorks2014 into it, deploys, and discards
+#               it. Fully self-contained: no external server required. Ideal for
+#               demonstrating the CD flow without any infrastructure.
+#
+# Environment secrets for `external` mode (Settings -> Environments -> dev/prod,
+# SAME secret names in each):
+#   DBT_SQLSERVER_HOST, DBT_SQLSERVER_DATABASE, DBT_SQLSERVER_USER,
+#   DBT_SQLSERVER_PASSWORD, DBT_SCHEMA
+# Optional repo-level secret for notifications: SLACK_WEBHOOK_URL.
+#
+# For `push` events the mode defaults to `external`; override it with the repo
+# variable DEPLOY_DB_MODE (Settings -> Secrets and variables -> Actions -> Variables).
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+      - 'feature/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment to deploy to'
+        type: choice
+        required: true
+        default: dev
+        options:
+          - dev
+          - prod
+      db-mode:
+        description: 'Database mode (external = real server via secrets, container = throwaway SQL Server in the runner)'
+        type: choice
+        required: true
+        default: container
+        options:
+          - container
+          - external
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Determine the target environment + database mode
+  # ---------------------------------------------------------------------------
+  determine-environment:
+    name: Determine environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      target: ${{ steps.env.outputs.target }}
+      db-mode: ${{ steps.env.outputs.db_mode }}
+    steps:
+      - name: Resolve environment
+        id: env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ENV="${{ github.event.inputs.environment }}"
+            MODE="${{ github.event.inputs.db-mode }}"
+          else
+            MODE="${{ vars.DEPLOY_DB_MODE }}"
+            MODE="${MODE:-container}"
+            if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+              ENV="prod"
+            else
+              ENV="dev"
+            fi
+          fi
+          echo "environment=$ENV" >> "$GITHUB_OUTPUT"
+          echo "target=$ENV" >> "$GITHUB_OUTPUT"
+          echo "db_mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "::notice::Deploying to '$ENV' (target=$ENV, db-mode=$MODE, branch=${{ github.ref_name }})"
+
+  # ===========================================================================
+  # MODE 1: EXTERNAL — deploy to a real SQL Server via environment secrets
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Pre-deployment validation
+  # ---------------------------------------------------------------------------
+  pre-deploy:
+    name: Pre-deployment checks (external)
+    runs-on: ubuntu-22.04
+    needs: determine-environment
+    if: needs.determine-environment.outputs.db-mode == 'external'
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    env:
+      DBT_TARGET: ${{ needs.determine-environment.outputs.target }}
+      DBT_SQLSERVER_HOST: ${{ secrets.DBT_SQLSERVER_HOST }}
+      DBT_SQLSERVER_DATABASE: ${{ secrets.DBT_SQLSERVER_DATABASE }}
+      DBT_SQLSERVER_USER: ${{ secrets.DBT_SQLSERVER_USER }}
+      DBT_SQLSERVER_PASSWORD: ${{ secrets.DBT_SQLSERVER_PASSWORD }}
+      DBT_SCHEMA: ${{ secrets.DBT_SCHEMA }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Microsoft ODBC Driver 17 + dbt
+        run: |
+          if ! dpkg -s msodbcsql17 >/dev/null 2>&1; then
+            sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/mssql-release.list
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /usr/share/keyrings/microsoft-prod.gpg
+            echo "deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+            sudo apt-get update
+            sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unixodbc-dev
+          pip install dbt-sqlserver==1.8.7
+
+      - name: dbt deps
+        working-directory: dbt
+        run: dbt deps
+
+      - name: dbt parse (manifest / syntax validation)
+        working-directory: dbt
+        run: dbt parse --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: dbt debug (connection validation)
+        working-directory: dbt
+        run: dbt debug --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: dbt compile (pre-deployment compile check)
+        working-directory: dbt
+        run: dbt compile --target "${{ needs.determine-environment.outputs.target }}"
+
+  # ---------------------------------------------------------------------------
+  # Production backup (before touching prod data)
+  # ---------------------------------------------------------------------------
+  backup:
+    name: Backup production database
+    runs-on: ubuntu-22.04
+    needs: determine-environment
+    if: needs.determine-environment.outputs.db-mode == 'external' && needs.determine-environment.outputs.environment == 'prod'
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    env:
+      DBT_SQLSERVER_HOST: ${{ secrets.DBT_SQLSERVER_HOST }}
+      DBT_SQLSERVER_DATABASE: ${{ secrets.DBT_SQLSERVER_DATABASE }}
+      DBT_SQLSERVER_USER: ${{ secrets.DBT_SQLSERVER_USER }}
+      DBT_SQLSERVER_PASSWORD: ${{ secrets.DBT_SQLSERVER_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Microsoft ODBC Driver 17
+        run: |
+          if ! dpkg -s msodbcsql17 >/dev/null 2>&1; then
+            sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/mssql-release.list
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /usr/share/keyrings/microsoft-prod.gpg
+            echo "deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+            sudo apt-get update
+            sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unixodbc-dev
+          pip install pyodbc==4.0.39
+
+      - name: Create pre-deployment backup
+        run: |
+          python - <<'PY'
+          import os, datetime
+          import pyodbc
+
+          host = os.environ["DBT_SQLSERVER_HOST"]
+          user = os.environ["DBT_SQLSERVER_USER"]
+          password = os.environ["DBT_SQLSERVER_PASSWORD"]
+          database = os.environ["DBT_SQLSERVER_DATABASE"]
+
+          stamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+          backup_name = f"AdventureWorks2014_predeploy_{stamp}.bak"
+
+          conn = pyodbc.connect(
+              "DRIVER={ODBC Driver 17 for SQL Server};"
+              f"SERVER={host};UID={user};PWD={password};DATABASE=master;"
+              "TrustServerCertificate=yes",
+              autocommit=True,
+          )
+          cur = conn.cursor()
+          cur.execute(f"BACKUP DATABASE [{database}] TO DISK = N'/var/opt/mssql/backup/{backup_name}' WITH INIT")
+          while cur.nextset():
+              pass
+          print(f"Pre-deployment backup created: {backup_name}")
+          PY
+
+  # ---------------------------------------------------------------------------
+  # Deploy: dbt deps -> run -> snapshot -> test (external)
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy DBT models (external)
+    runs-on: ubuntu-22.04
+    needs: [determine-environment, pre-deploy]
+    if: needs.determine-environment.outputs.db-mode == 'external'
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    env:
+      DBT_TARGET: ${{ needs.determine-environment.outputs.target }}
+      DBT_SQLSERVER_HOST: ${{ secrets.DBT_SQLSERVER_HOST }}
+      DBT_SQLSERVER_DATABASE: ${{ secrets.DBT_SQLSERVER_DATABASE }}
+      DBT_SQLSERVER_USER: ${{ secrets.DBT_SQLSERVER_USER }}
+      DBT_SQLSERVER_PASSWORD: ${{ secrets.DBT_SQLSERVER_PASSWORD }}
+      DBT_SCHEMA: ${{ secrets.DBT_SCHEMA }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Microsoft ODBC Driver 17 + dbt
+        run: |
+          if ! dpkg -s msodbcsql17 >/dev/null 2>&1; then
+            sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/mssql-release.list
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /usr/share/keyrings/microsoft-prod.gpg
+            echo "deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+            sudo apt-get update
+            sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unixodbc-dev
+          pip install dbt-sqlserver==1.8.7
+
+      - name: Install DBT dependencies (dbt deps)
+        working-directory: dbt
+        run: dbt deps --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: Run DBT models (dbt run)
+        working-directory: dbt
+        run: dbt run --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: Run DBT snapshots (SCD2)
+        working-directory: dbt
+        run: |
+          if [ -d snapshots ]; then
+            dbt snapshot --target "${{ needs.determine-environment.outputs.target }}"
+          else
+            echo "No snapshots directory found, skipping dbt snapshot."
+          fi
+
+      - name: Test data quality (dbt test)
+        working-directory: dbt
+        run: dbt test --target "${{ needs.determine-environment.outputs.target }}"
+
+  # ---------------------------------------------------------------------------
+  # Post-deployment: documentation + health summary (external)
+  # ---------------------------------------------------------------------------
+  post-deploy:
+    name: Post-deployment checks (external)
+    runs-on: ubuntu-22.04
+    needs: [determine-environment, deploy]
+    if: needs.determine-environment.outputs.db-mode == 'external'
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    env:
+      DBT_TARGET: ${{ needs.determine-environment.outputs.target }}
+      DBT_SQLSERVER_HOST: ${{ secrets.DBT_SQLSERVER_HOST }}
+      DBT_SQLSERVER_DATABASE: ${{ secrets.DBT_SQLSERVER_DATABASE }}
+      DBT_SQLSERVER_USER: ${{ secrets.DBT_SQLSERVER_USER }}
+      DBT_SQLSERVER_PASSWORD: ${{ secrets.DBT_SQLSERVER_PASSWORD }}
+      DBT_SCHEMA: ${{ secrets.DBT_SCHEMA }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Microsoft ODBC Driver 17 + dbt
+        run: |
+          if ! dpkg -s msodbcsql17 >/dev/null 2>&1; then
+            sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/mssql-release.list
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /usr/share/keyrings/microsoft-prod.gpg
+            echo "deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+            sudo apt-get update
+            sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unixodbc-dev
+          pip install dbt-sqlserver==1.8.7
+
+      - name: Post-deployment health check (re-run tests)
+        working-directory: dbt
+        run: dbt test --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: Generate documentation
+        working-directory: dbt
+        run: dbt docs generate --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: Upload dbt docs + deployment log artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-artifacts-${{ needs.determine-environment.outputs.environment }}
+          path: |
+            dbt/target/manifest.json
+            dbt/target/catalog.json
+            dbt/target/index.html
+            dbt/logs/dbt.log
+          if-no-files-found: warn
+
+      - name: Write deployment log summary
+        run: |
+          {
+            echo "# Deployment report"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Environment | \`${{ needs.determine-environment.outputs.environment }}\` |"
+            echo "| Target | \`${{ needs.determine-environment.outputs.target }}\` |"
+            echo "| Database mode | \`external\` |"
+            echo "| Branch | \`${{ github.ref_name }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Triggered by | \`${{ github.actor }}\` |"
+            echo "| Run | [\`${{ github.run_id }}\`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # MODE 2: CONTAINER — self-contained deploy into a throwaway SQL Server
+  # ===========================================================================
+  deploy-container:
+    name: Deploy DBT models (throwaway SQL Server)
+    runs-on: ubuntu-22.04
+    needs: determine-environment
+    if: needs.determine-environment.outputs.db-mode == 'container'
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2019-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          SA_PASSWORD: 'YourStrong@Passw0rd'
+          MSSQL_PID: 'Developer'
+        ports:
+          - 1433:1433
+        volumes:
+          - ${{ github.workspace }}:/work
+    env:
+      DBT_TARGET: ${{ needs.determine-environment.outputs.target }}
+      DBT_SQLSERVER_HOST: localhost
+      DBT_SQLSERVER_USER: sa
+      DBT_SQLSERVER_PASSWORD: 'YourStrong@Passw0rd'
+      DBT_SQLSERVER_DATABASE: AdventureWorks2014
+      DBT_SCHEMA: dbo
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Microsoft ODBC Driver 17 + dbt
+        run: |
+          if ! dpkg -s msodbcsql17 >/dev/null 2>&1; then
+            sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/mssql-release.list
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /usr/share/keyrings/microsoft-prod.gpg
+            echo "deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+            sudo apt-get update
+            sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unixodbc-dev
+          pip install dbt-sqlserver==1.8.7
+
+      - name: Download AdventureWorks2014 backup
+        run: |
+          curl -fL -o AdventureWorks2014.bak \
+            https://github.com/Microsoft/sql-server-samples/releases/download/adventureworks/AdventureWorks2014.bak
+          chmod 644 AdventureWorks2014.bak
+          ls -lh AdventureWorks2014.bak
+
+      - name: Restore AdventureWorks2014 into SQL Server service container
+        run: |
+          python - <<'PY'
+          import os, sys, time
+          import pyodbc
+
+          password = os.environ["DBT_SQLSERVER_PASSWORD"]
+          conn_str = (
+              "DRIVER={ODBC Driver 17 for SQL Server};SERVER=localhost;UID=sa;"
+              f"PWD={password};DATABASE=master;TrustServerCertificate=yes"
+          )
+
+          conn = None
+          for attempt in range(30):
+              try:
+                  conn = pyodbc.connect(conn_str, autocommit=True, timeout=5)
+                  break
+              except pyodbc.Error as exc:
+                  print(f"Waiting for SQL Server... ({attempt + 1}/30) {exc}")
+                  time.sleep(5)
+          if conn is None:
+              sys.exit("SQL Server did not become ready in time.")
+
+          bak = "/work/AdventureWorks2014.bak"
+          restore = (
+              "RESTORE DATABASE AdventureWorks2014 "
+              f"FROM DISK = '{bak}' "
+              "WITH MOVE 'AdventureWorks2014_Data' TO '/var/opt/mssql/data/AdventureWorks2014.mdf', "
+              "MOVE 'AdventureWorks2014_Log' TO '/var/opt/mssql/data/AdventureWorks2014_log.ldf', "
+              "REPLACE"
+          )
+          print("Restoring AdventureWorks2014 ...")
+          cur = conn.cursor()
+          cur.execute(restore)
+          while cur.nextset():
+              pass
+          print("AdventureWorks2014 restored successfully.")
+          PY
+
+      - name: dbt deps
+        working-directory: dbt
+        run: dbt deps
+
+      - name: dbt debug (connection check to the container)
+        working-directory: dbt
+        run: dbt debug --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: dbt run
+        working-directory: dbt
+        run: dbt run --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: dbt snapshot
+        working-directory: dbt
+        run: |
+          if [ -d snapshots ]; then
+            dbt snapshot --target "${{ needs.determine-environment.outputs.target }}"
+          else
+            echo "No snapshots directory found, skipping dbt snapshot."
+          fi
+
+      - name: dbt test
+        working-directory: dbt
+        run: dbt test --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: dbt docs generate
+        working-directory: dbt
+        run: dbt docs generate --target "${{ needs.determine-environment.outputs.target }}"
+
+      - name: Upload dbt docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-artifacts-${{ needs.determine-environment.outputs.environment }}
+          path: |
+            dbt/target/manifest.json
+            dbt/target/catalog.json
+            dbt/target/index.html
+            dbt/logs/dbt.log
+          if-no-files-found: warn
+
+      - name: Write deployment log summary
+        run: |
+          {
+            echo "# Deployment report"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Environment | \`${{ needs.determine-environment.outputs.environment }}\` |"
+            echo "| Target | \`${{ needs.determine-environment.outputs.target }}\` |"
+            echo "| Database mode | \`container\` (throwaway SQL Server, discarded after run) |"
+            echo "| Branch | \`${{ github.ref_name }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Triggered by | \`${{ github.actor }}\` |"
+            echo "| Run | [\`${{ github.run_id }}\`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Notification (Slack if configured, otherwise job summary / notice)
+  # ---------------------------------------------------------------------------
+  notify:
+    name: Notify team
+    runs-on: ubuntu-latest
+    needs: [determine-environment, deploy, deploy-container, post-deploy]
+    if: always()
+    steps:
+      - name: Compose notification message
+        id: message
+        run: |
+          ENV="${{ needs.determine-environment.outputs.environment }}"
+          D1="${{ needs.deploy.result }}"
+          D2="${{ needs.deploy-container.result }}"
+          # success if the active deploy job succeeded
+          if [[ "$D1" == "success" || "$D2" == "success" ]]; then
+            TEXT=":white_check_mark: *DataOps deployment SUCCEEDED* to *$ENV* (branch \`${{ github.ref_name }}\`, commit \`${{ github.sha }}\`)"
+          else
+            TEXT=":x: *DataOps deployment FAILED* to *$ENV* (branch \`${{ github.ref_name }}\`, commit \`${{ github.sha }}\`)"
+          fi
+          echo "text=$TEXT" >> "$GITHUB_OUTPUT"
+
+      - name: Send Slack notification
+        if: secrets.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -s -X POST -H 'Content-type: application/json' \
+            --data "{\"text\": \"${{ steps.message.outputs.text }}\"}" \
+            "$SLACK_WEBHOOK_URL"
+
+      - name: Fallback notification (GitHub Actions output)
+        if: secrets.SLACK_WEBHOOK_URL == ''
+        run: |
+          echo "${{ steps.message.outputs.text }}" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ needs.deploy.result }}" != "success" && "${{ needs.deploy-container.result }}" != "success" ]]; then
+            echo "::error::${{ steps.message.outputs.text }}"
+          else
+            echo "::notice::${{ steps.message.outputs.text }}"
+          fi

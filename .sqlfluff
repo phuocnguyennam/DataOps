@@ -1,0 +1,19 @@
+[sqlfluff]
+# SQL lint configuration for the DBT models.
+#
+# We use the `jinja` templater with `apply_dbt_builtins` so `{{ source() }}` and
+# `{{ ref() }}` resolve without a live database connection. This keeps SQL linting
+# fast and fully self-contained in CI.
+#
+# If your models start using package/custom macros (e.g. dbt_utils.*) inside the
+# SQL files themselves, switch `templater` to `dbt`, install
+# `sqlfluff-templater-dbt`, and run `dbt parse` before linting.
+templater = jinja
+dialect = tsql
+
+# Relax rules that are noisy for hand-written T-SQL casts and conventions.
+exclude_rules = AL01, AM04, CP01, CP02, CP03, LT01, LT02, LT05, LT09, LT12, RF02, RF04, ST06
+
+[sqlfluff:templater:jinja]
+apply_dbt_builtins = True
+
