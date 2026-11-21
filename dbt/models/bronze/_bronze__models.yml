@@ -1,0 +1,190 @@
+version: 2
+
+models:
+  - name: brnz_sales_order_header
+    description: >
+      Bronze staging of Sales.SalesOrderHeader. One row per sales order (1:1 with source).
+      Columns renamed to snake_case, typed explicitly and trimmed. Technical and
+      sensitive columns (rowguid, CreditCardID, CreditCardApprovalCode, address IDs,
+      CurrencyRateID, RevisionNumber, Comment) are excluded.
+    columns:
+      - name: sales_order_id
+        description: Primary key of the sales order (SalesOrderID).
+        tests:
+          - unique
+          - not_null
+      - name: order_date
+        description: Date the sales order was created.
+      - name: due_date
+        description: Date the order is due to the customer.
+      - name: ship_date
+        description: Date the order was shipped to the customer. NULL if not yet shipped.
+      - name: order_status_code
+        description: "Raw order status: 1 In process, 2 Approved, 3 Backordered, 4 Rejected, 5 Shipped, 6 Cancelled."
+      - name: is_online_order
+        description: 1 = order placed online by the customer, 0 = placed by a sales person (reseller).
+      - name: sales_order_number
+        description: Business identifier of the sales order (e.g. SO43659).
+      - name: purchase_order_number
+        description: Customer purchase order number reference. NULL for online orders.
+      - name: account_number
+        description: Financial accounting number reference.
+      - name: customer_id
+        description: Customer identifier (FK to Sales.Customer).
+      - name: sales_person_id
+        description: Sales person who created the order. NULL for online orders.
+      - name: territory_id
+        description: Territory in which the sale was made.
+      - name: ship_method_id
+        description: Shipping method identifier.
+      - name: subtotal_amount
+        description: Sales subtotal = sum of order line totals.
+      - name: tax_amount
+        description: Tax amount.
+      - name: freight_amount
+        description: Shipping cost.
+      - name: total_due_amount
+        description: Total due from customer = subtotal + tax + freight.
+      - name: modified_at
+        description: Date and time the source record was last updated.
+
+  - name: brnz_sales_order_detail
+    description: >
+      Bronze staging of Sales.SalesOrderDetail. One row per order line (1:1 with source).
+      Columns renamed to snake_case, typed explicitly and trimmed; rowguid excluded.
+    columns:
+      - name: sales_order_detail_id
+        description: Primary key of the order line (SalesOrderDetailID).
+        tests:
+          - unique
+          - not_null
+      - name: sales_order_id
+        description: Sales order the line belongs to (FK to brnz_sales_order_header).
+      - name: product_id
+        description: Product sold (FK to brnz_product).
+      - name: special_offer_id
+        description: Promotional / special offer identifier applied to the line.
+      - name: carrier_tracking_number
+        description: Shipment tracking number supplied by the shipper. NULL for online orders.
+      - name: order_qty
+        description: Quantity ordered per product.
+      - name: unit_price
+        description: Selling price of a single product.
+      - name: unit_price_discount_pct
+        description: Discount ratio applied to the unit price (0 - 1, e.g. 0.10 = 10%). Not an amount.
+      - name: line_total
+        description: Line subtotal = unit_price * (1 - unit_price_discount_pct) * order_qty.
+      - name: modified_at
+        description: Date and time the source record was last updated.
+
+  - name: brnz_product
+    description: >
+      Bronze staging of Production.Product. One row per product (1:1 with source).
+      Columns renamed to snake_case, typed explicitly; nchar(2) code columns trimmed;
+      rowguid excluded.
+    columns:
+      - name: product_id
+        description: Primary key of the product (ProductID).
+        tests:
+          - unique
+          - not_null
+      - name: product_name
+        description: Product name.
+      - name: product_number
+        description: Unique product identification number (e.g. BK-R93R-62).
+      - name: is_manufactured_in_house
+        description: 1 = product is manufactured in-house, 0 = purchased.
+      - name: is_finished_good
+        description: 1 = product is a salable finished good, 0 = component / not salable.
+      - name: color
+        description: Product color. NULL when not applicable.
+      - name: safety_stock_level
+        description: Minimum inventory quantity.
+      - name: reorder_point
+        description: Inventory level that triggers a purchase order or work order.
+      - name: standard_cost
+        description: Standard cost of the product.
+      - name: list_price
+        description: Selling list price. 0 for components that are not sold.
+      - name: size
+        description: Product size.
+      - name: size_unit
+        description: Unit of measure for size.
+      - name: weight_unit
+        description: Unit of measure for weight.
+      - name: weight
+        description: Product weight.
+      - name: days_to_manufacture
+        description: Number of days required to manufacture the product.
+      - name: product_line_code
+        description: "Raw product line code: R Road, M Mountain, T Touring, S Standard. NULL if not applicable."
+      - name: class_code
+        description: "Raw class code: H High, M Medium, L Low."
+      - name: style_code
+        description: "Raw style code: W Womens, M Mens, U Universal."
+      - name: product_subcategory_id
+        description: Product subcategory identifier. NULL for components.
+      - name: product_model_id
+        description: Product model identifier.
+      - name: sell_start_date
+        description: Date the product was available for sale.
+      - name: sell_end_date
+        description: Date the product was no longer available for sale.
+      - name: discontinued_date
+        description: Date the product was discontinued.
+      - name: modified_at
+        description: Date and time the source record was last updated.
+
+  - name: brnz_customer
+    description: >
+      Bronze staging of Sales.Customer. One row per customer record (1:1 with source).
+      Columns renamed to snake_case, typed explicitly; rowguid excluded.
+      Includes flags for individual retail consumer vs wholesale store account.
+    columns:
+      - name: customer_id
+        description: Primary key of the customer record (CustomerID).
+        tests:
+          - unique
+          - not_null
+      - name: person_id
+        description: Foreign key to Person.Person. Populated for retail consumers, NULL for store accounts.
+      - name: store_id
+        description: Foreign key to Sales.Store. Populated for wholesale store accounts, NULL for consumers.
+      - name: territory_id
+        description: Territory identifier where the customer belongs.
+      - name: account_number
+        description: Customer account identifier (e.g. AW00000001).
+      - name: is_individual
+        description: 1 if the customer is an individual retail consumer (person_id is not null).
+      - name: is_store_customer
+        description: 1 if the customer is a wholesale store / corporate account (store_id is not null).
+      - name: modified_at
+        description: Date and time the source record was last updated.
+
+  - name: brnz_person
+    description: >
+      Bronze staging of Person.Person. One row per person identity (1:1 with source).
+      Columns renamed to snake_case, typed explicitly and trimmed.
+      Technical and XML columns (rowguid, Demographics, AdditionalContactInfo) excluded.
+    columns:
+      - name: person_id
+        description: Primary key of the person (BusinessEntityID).
+        tests:
+          - unique
+          - not_null
+      - name: person_type_code
+        description: "Type of person: SC Store Contact, IN Individual Customer, SP Sales Person, EM Employee, VC Vendor Contact, GC General Contact."
+      - name: title
+        description: Primary title (e.g. Mr., Ms.). NULL if none.
+      - name: first_name
+        description: First name of the person.
+      - name: middle_name
+        description: Middle name of the person. NULL if none.
+      - name: last_name
+        description: Last name of the person.
+      - name: suffix
+        description: Name suffix (e.g. Jr., Sr., III). NULL if none.
+      - name: email_promotion_code
+        description: 0 = does not receive promotions, 1 = receives from AW, 2 = receives from AW and partners.
+      - name: modified_at
+        description: Date and time the source record was last updated.

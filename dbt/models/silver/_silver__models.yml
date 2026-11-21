@@ -1,0 +1,226 @@
+version: 2
+
+models:
+  - name: slvr_products
+    description: >
+      Cleaned product dimension (1 row per product). Raw codes are decoded into
+      readable attributes and business classifications (type, price tier, active flag)
+      are added. No rows are filtered.
+    columns:
+      - name: product_id
+        description: Primary key of the product.
+        tests:
+          - unique
+          - not_null
+      - name: product_name
+        description: Product name.
+      - name: product_number
+        description: Unique product identification number.
+      - name: product_subcategory_id
+        description: Product subcategory identifier. NULL for components.
+      - name: color
+        description: Product color, 'N/A' when not applicable.
+      - name: standard_cost
+        description: Standard cost of the product.
+      - name: list_price
+        description: Selling list price.
+      - name: unit_margin
+        description: Theoretical margin per unit = list_price - standard_cost.
+      - name: product_line
+        description: Decoded product line (Road, Mountain, Touring, Standard, Unknown).
+        tests:
+          - accepted_values:
+              values: ['Road', 'Mountain', 'Touring', 'Standard', 'Unknown']
+      - name: product_class
+        description: Decoded class (High, Medium, Low, Unknown).
+      - name: product_style
+        description: Decoded style (Women, Men, Universal, Unknown).
+      - name: product_type
+        description: "'Finished Good' if salable, otherwise 'Component'."
+      - name: price_tier
+        description: "List price band: Not For Sale (0), Low (<100), Mid (<1000), Premium (>=1000)."
+      - name: is_active
+        description: 1 if the product is still on sale (no sell end date and not discontinued).
+      - name: sell_start_date
+        description: Date the product was available for sale.
+      - name: sell_end_date
+        description: Date the product was no longer available for sale.
+      - name: modified_at
+        description: Date and time the source record was last updated.
+
+  - name: slvr_customers
+    description: >
+      Cleaned customer dimension (1 row per customer). Built by joining brnz_customer
+      and brnz_person. Adds formatted full names, customer segmentation
+      (Retail Individual vs Wholesale Store), and decoded email promotion preferences.
+    columns:
+      - name: customer_id
+        description: Primary key of the customer record.
+        tests:
+          - unique
+          - not_null
+      - name: account_number
+        description: Customer account identifier.
+        tests:
+          - unique
+          - not_null
+      - name: person_id
+        description: Person identity reference. Populated for retail consumers, NULL for store accounts.
+      - name: store_id
+        description: Store reference. Populated for wholesale store accounts, NULL for consumers.
+      - name: territory_id
+        description: Sales territory the customer is assigned to.
+      - name: first_name
+        description: First name of the customer (NULL for store accounts).
+      - name: last_name
+        description: Last name of the customer (NULL for store accounts).
+      - name: full_name
+        description: Formatted full name of the customer, or default store name.
+        tests:
+          - not_null
+      - name: customer_type
+        description: "'Retail Individual' or 'Wholesale Store'."
+        tests:
+          - accepted_values:
+              values: ['Retail Individual', 'Wholesale Store', 'Other']
+      - name: email_promotion
+        description: "Decoded email promotion preference: 'No', 'Direct Channel', 'Partner Channel', 'Unknown'."
+        tests:
+          - accepted_values:
+              values: ['No', 'Direct Channel', 'Partner Channel', 'Unknown']
+      - name: is_individual
+        description: 1 for retail consumer accounts.
+      - name: is_store_customer
+        description: 1 for wholesale store accounts.
+      - name: modified_at
+        description: Last update timestamp.
+
+  - name: slvr_sales_order_lines
+    description: >
+      Order-line fact (1 row per order line) built by joining brnz_sales_order_detail,
+      brnz_sales_order_header and brnz_product. Adds decoded channel/status and
+      revenue, discount, cost and profit measures. Excludes rows with non-positive
+      quantity, negative price, and Rejected/Cancelled orders.
+      Limitation: cost uses the product's current standard_cost (no cost history).
+    columns:
+      - name: sales_order_detail_id
+        description: Primary key of the order line.
+        tests:
+          - unique
+          - not_null
+      - name: sales_order_id
+        description: Sales order the line belongs to.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('slvr_sales_orders')
+              field: sales_order_id
+      - name: sales_order_number
+        description: Business identifier of the sales order.
+      - name: product_id
+        description: Product sold.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('slvr_products')
+              field: product_id
+      - name: customer_id
+        description: Customer who placed the order.
+      - name: territory_id
+        description: Sales territory.
+      - name: order_date
+        description: Order date (date only).
+      - name: order_year
+        description: Calendar year of the order.
+      - name: order_month
+        description: Calendar month (1-12) of the order.
+      - name: order_channel
+        description: Online (customer self-service) or Reseller (via sales person).
+        tests:
+          - accepted_values:
+              values: ['Online', 'Reseller']
+      - name: order_status
+        description: Decoded order status (Rejected and Cancelled are excluded).
+        tests:
+          - accepted_values:
+              values: ['In Process', 'Approved', 'Backordered', 'Shipped']
+      - name: order_qty
+        description: Quantity ordered.
+      - name: unit_price
+        description: Selling price per unit.
+      - name: unit_price_discount_pct
+        description: Discount ratio (0 - 1).
+      - name: gross_amount
+        description: Revenue before discount = unit_price * order_qty.
+      - name: discount_amount
+        description: Discount value = gross_amount - net_amount.
+      - name: net_amount
+        description: Revenue after discount (source LineTotal).
+        tests:
+          - not_null
+      - name: standard_cost
+        description: Current standard cost per unit of the product.
+      - name: cost_amount
+        description: Cost of goods = standard_cost * order_qty.
+      - name: gross_profit
+        description: net_amount - cost_amount.
+      - name: has_discount
+        description: 1 if a discount was applied to the line.
+
+  - name: slvr_sales_orders
+    description: >
+      Order-level fact (1 row per sales order). Header joined with order lines
+      aggregated once per order. Adds shipping performance metrics and a subtotal
+      reconciliation flag. Excludes Rejected/Cancelled orders.
+    columns:
+      - name: sales_order_id
+        description: Primary key of the sales order.
+        tests:
+          - unique
+          - not_null
+      - name: sales_order_number
+        description: Business identifier of the sales order.
+      - name: customer_id
+        description: Customer who placed the order.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('slvr_customers')
+              field: customer_id
+      - name: sales_person_id
+        description: Sales person, NULL for online orders.
+      - name: territory_id
+        description: Sales territory.
+      - name: order_channel
+        description: Online or Reseller.
+        tests:
+          - accepted_values:
+              values: ['Online', 'Reseller']
+      - name: order_status
+        description: Decoded order status.
+      - name: order_date
+        description: Order date.
+      - name: due_date
+        description: Due date.
+      - name: ship_date
+        description: Ship date, NULL if not shipped.
+      - name: days_to_ship
+        description: Days between order date and ship date.
+      - name: is_late_shipment
+        description: 1 if shipped after the due date.
+      - name: line_count
+        description: Number of order lines.
+      - name: total_units
+        description: Total quantity of units in the order.
+      - name: subtotal_amount
+        description: Order subtotal from the header.
+      - name: tax_amount
+        description: Tax amount.
+      - name: freight_amount
+        description: Shipping cost.
+      - name: total_due_amount
+        description: Total amount due.
+      - name: lines_subtotal
+        description: Sum of line totals from order details.
+      - name: is_subtotal_reconciled
+        description: Data-quality flag, 1 if header subtotal matches the sum of line totals (tolerance 0.01).
