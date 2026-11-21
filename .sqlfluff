@@ -11,11 +11,19 @@
 templater = jinja
 dialect = tsql
 
+<<<<<<< HEAD
 # Relax rules that are noisy for hand-written T-SQL casts.
 exclude_rules = L016, L029, L034, L036, L038
+=======
+# Relax rules that are noisy for hand-written T-SQL casts and conventions.
+exclude_rules = AL01, AM04, CP01, CP02, CP03, LT01, LT02, LT05, LT09, LT12, RF02, RF04, ST06
+>>>>>>> origin/feature/airflow-and-tests
 
 [sqlfluff:templater:jinja]
 apply_dbt_builtins = True
 
+<<<<<<< HEAD
 [sqlfluff:rules:L010]
 capitalisation_policy = upper
+=======
+>>>>>>> origin/feature/airflow-and-tests

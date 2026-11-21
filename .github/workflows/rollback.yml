@@ -64,10 +64,22 @@ jobs:
 
       - name: Install Microsoft ODBC Driver 17 + dbt
         run: |
+<<<<<<< HEAD
           curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
           curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
           sudo apt-get update
           sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 unixodbc-dev
+=======
+          if ! dpkg -s msodbcsql17 >/dev/null 2>&1; then
+            sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/mssql-release.list
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /usr/share/keyrings/microsoft-prod.gpg
+            echo "deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+            sudo apt-get update
+            sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unixodbc-dev
+>>>>>>> origin/feature/airflow-and-tests
           pip install dbt-sqlserver==1.8.7
 
       - name: Install DBT dependencies
