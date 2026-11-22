@@ -1,0 +1,30 @@
+@startuml architecture
+!theme plain
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+skinparam linetype ortho
+title Kiến trúc hệ thống DataOps Pipeline
+
+package "Docker Compose — mạng dbt_airflow_network" {
+    database "SQL Server nguồn\n(AdventureWorks2014)\ncổng 1433" as SRC
+    component "DBT container\n(bronze → silver → gold)" as DBT
+    database "SQL Server đích\n(schema bronze/silver/gold)" as TGT
+    node "Airflow Webserver\ncổng 8080" as WEB
+    node "Airflow Scheduler" as SCH
+    database "PostgreSQL\n(metadata Airflow)\ncổng 5432" as PG
+}
+
+cloud "GitHub Actions\n(CI / CD / Rollback)" as GH
+cloud "Slack" as SLACK
+actor "Nhà phát triển" as DEV
+
+DEV --> GH : "push / PR / merge"
+GH --> DBT : "dbt deps · run · test"
+GH --> SLACK : "thông báo kết quả"
+SRC --> DBT : "đọc dữ liệu nguồn"
+DBT --> TGT : "ghi model đã transform"
+SCH --> DBT : "docker exec dbt ..."
+SCH --> PG : "lưu trạng thái & log"
+WEB ..> SCH : "giao diện điều khiển"
+
+@enduml

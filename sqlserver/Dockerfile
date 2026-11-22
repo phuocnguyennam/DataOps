@@ -11,15 +11,12 @@ RUN curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add - && \
     ACCEPT_EULA=Y apt-get install -y mssql-tools unixodbc-dev && \
     echo 'export PATH="$PATH:/opt/mssql-tools/bin"' >> ~/.bashrc
 
-# Download and install AdventureWorks database
-RUN curl -L -o /tmp/AdventureWorks2014.bak https://github.com/Microsoft/sql-server-samples/releases/download/adventureworks/AdventureWorks2014.bak
-
-# Create a script to restore the database
+# Script khôi phục AdventureWorks2014 (tự tải backup + restore + tạo login dbt)
 COPY restore_db.sh /tmp/restore_db.sh
 RUN chmod +x /tmp/restore_db.sh
 
 # Switch back to mssql user
 USER mssql
 
-# Start SQL Server and keep it running
-CMD /opt/mssql/bin/sqlservr 
+# Chạy restore_db.sh nền rồi khởi động SQL Server
+CMD /bin/sh -c "/tmp/restore_db.sh & exec /opt/mssql/bin/sqlservr"

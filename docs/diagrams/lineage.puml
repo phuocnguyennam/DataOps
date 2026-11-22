@@ -1,0 +1,66 @@
+@startuml lineage
+!theme plain
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+skinparam linetype ortho
+title Data Lineage — dòng dữ liệu medallion (bronze → silver → gold)
+
+package "Nguồn (OLTP AdventureWorks2014)" as SRC {
+    database "sales.Customer" as s_customer
+    database "person.Person" as s_person
+    database "production.Product" as s_product
+    database "sales.SalesOrderHeader" as s_header
+    database "sales.SalesOrderDetail" as s_detail
+}
+
+package "Bronze (view)" as BRZ {
+    component "brnz_customer" as b_customer
+    component "brnz_person" as b_person
+    component "brnz_product" as b_product
+    component "brnz_sales_order_header" as b_header
+    component "brnz_sales_order_detail" as b_detail
+}
+
+package "Silver (table)" as SLV {
+    component "slvr_customers" as v_customers
+    component "slvr_products" as v_products
+    component "slvr_sales_order_lines" as v_lines
+    component "slvr_sales_orders" as v_orders
+}
+
+package "Gold (table)" as GLD {
+    component "gld_sales_daily" as g_daily
+    component "gld_product_performance" as g_product
+    component "gld_customer_metrics" as g_customer
+    component "gld_monthly_sales_summary" as g_monthly
+}
+
+' Nguồn -> Bronze
+s_customer --> b_customer
+s_person --> b_person
+s_product --> b_product
+s_header --> b_header
+s_detail --> b_detail
+
+' Bronze -> Silver
+b_customer --> v_customers
+b_person --> v_customers
+b_product --> v_products
+b_product --> v_lines
+b_header --> v_lines
+b_detail --> v_lines
+b_header --> v_orders
+b_detail --> v_orders
+
+' Silver -> Gold
+v_lines --> g_daily
+v_orders --> g_daily
+v_products --> g_product
+v_lines --> g_product
+v_customers --> g_customer
+v_lines --> g_customer
+v_orders --> g_customer
+v_lines --> g_monthly
+v_orders --> g_monthly
+
+@enduml
