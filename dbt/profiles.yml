@@ -25,12 +25,12 @@ dbt_airflow_project:
     dev:
       type: sqlserver
       driver: 'ODBC Driver 17 for SQL Server'
-      server: "{{ env_var('DBT_SQLSERVER_HOST', 'host.docker.internal') }}"
+      server: "{{ env_var('DBT_SQLSERVER_HOST', 'sqlserver') }}"
       port: 1433
       database: "{{ env_var('DBT_SQLSERVER_DATABASE', 'AdventureWorks2014') }}"
       schema: "{{ env_var('DBT_SCHEMA', 'dbo') }}"
-      user: "{{ env_var('DBT_SQLSERVER_USER', 'imrandbtnew') }}"
-      password: "{{ env_var('DBT_SQLSERVER_PASSWORD', 'Imran@12345') }}"
+      user: "{{ env_var('DBT_SQLSERVER_USER', 'sa') }}"
+      password: "{{ env_var('DBT_SQLSERVER_PASSWORD', 'YourStrong@Passw0rd') }}"
       windows_login: False
       encrypt: False
       trust_cert: True
@@ -45,12 +45,12 @@ dbt_airflow_project:
     prod:
       type: sqlserver
       driver: 'ODBC Driver 17 for SQL Server'
-      server: "{{ env_var('DBT_SQLSERVER_HOST', 'host.docker.internal') }}"
+      server: "{{ env_var('DBT_SQLSERVER_HOST', 'sqlserver') }}"
       port: 1433
       database: "{{ env_var('DBT_SQLSERVER_DATABASE', 'AdventureWorks2014') }}"
       schema: "{{ env_var('DBT_SCHEMA', 'dbo') }}"
-      user: "{{ env_var('DBT_SQLSERVER_USER', 'imrandbtnew') }}"
-      password: "{{ env_var('DBT_SQLSERVER_PASSWORD', 'Imran@12345') }}"
+      user: "{{ env_var('DBT_SQLSERVER_USER', 'sa') }}"
+      password: "{{ env_var('DBT_SQLSERVER_PASSWORD', 'YourStrong@Passw0rd') }}"
       windows_login: False
       encrypt: False
       trust_cert: True

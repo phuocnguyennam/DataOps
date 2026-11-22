@@ -504,18 +504,15 @@ jobs:
           fi
           echo "text=$TEXT" >> "$GITHUB_OUTPUT"
 
-      - name: Send Slack notification
-        if: secrets.SLACK_WEBHOOK_URL != ''
+      - name: Send notification (Slack if configured, and GitHub Actions summary)
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          curl -s -X POST -H 'Content-type: application/json' \
-            --data "{\"text\": \"${{ steps.message.outputs.text }}\"}" \
-            "$SLACK_WEBHOOK_URL"
-
-      - name: Fallback notification (GitHub Actions output)
-        if: secrets.SLACK_WEBHOOK_URL == ''
-        run: |
+          if [[ -n "$SLACK_WEBHOOK_URL" ]]; then
+            curl -s -X POST -H 'Content-type: application/json' \
+              --data "{\"text\": \"${{ steps.message.outputs.text }}\"}" \
+              "$SLACK_WEBHOOK_URL"
+          fi
           echo "${{ steps.message.outputs.text }}" >> "$GITHUB_STEP_SUMMARY"
           if [[ "${{ needs.deploy.result }}" != "success" && "${{ needs.deploy-container.result }}" != "success" ]]; then
             echo "::error::${{ steps.message.outputs.text }}"
