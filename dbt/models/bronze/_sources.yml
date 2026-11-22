@@ -1,0 +1,83 @@
+version: 2
+
+sources:
+  - name: sales
+    description: >
+      Sales schema of the AdventureWorks2014 OLTP database (SQL Server).
+      Expected latency: the OLTP system is updated continuously, so new orders
+      should arrive at least daily. NOTE: AdventureWorks2014 is a static demo
+      dataset (last ModifiedDate ~2014-07), therefore freshness is configured
+      with `warn_after` only - it reports staleness without failing the pipeline.
+    database: AdventureWorks2014
+    schema: Sales
+    loaded_at_field: ModifiedDate
+    freshness:
+      warn_after: {count: 24, period: hour}
+    tables:
+      - name: SalesOrderHeader
+        description: General sales order information, one row per sales order.
+        columns:
+          - name: SalesOrderID
+            description: Primary key of the sales order.
+          - name: OrderDate
+            description: Date the sales order was created.
+          - name: ModifiedDate
+            description: Date and time the record was last updated (used for freshness).
+
+      - name: SalesOrderDetail
+        description: Individual products associated with a specific sales order (order lines).
+        columns:
+          - name: SalesOrderDetailID
+            description: Primary key, one incremental value per order line.
+          - name: SalesOrderID
+            description: Foreign key to SalesOrderHeader.
+          - name: ModifiedDate
+            description: Date and time the record was last updated (used for freshness).
+
+      - name: Customer
+        description: Current customer information (individual retail consumers and wholesale store accounts).
+        columns:
+          - name: CustomerID
+            description: Primary key of the customer record.
+          - name: PersonID
+            description: Foreign key to Person.Person (populated for individual retail consumers).
+          - name: StoreID
+            description: Foreign key to Sales.Store (populated for wholesale store accounts).
+          - name: ModifiedDate
+            description: Date and time the record was last updated (used for freshness).
+
+  - name: production
+    description: >
+      Production schema of AdventureWorks2014. Product master data changes slowly,
+      so a weekly freshness threshold is used (warn only, see note on `sales`).
+    database: AdventureWorks2014
+    schema: Production
+    loaded_at_field: ModifiedDate
+    freshness:
+      warn_after: {count: 7, period: day}
+    tables:
+      - name: Product
+        description: Products sold or used in the manufacturing of sold products.
+        columns:
+          - name: ProductID
+            description: Primary key of the product.
+          - name: ModifiedDate
+            description: Date and time the record was last updated (used for freshness).
+
+  - name: person
+    description: >
+      Person schema of AdventureWorks2014 containing identities of individuals
+      (consumers, employees, vendor contacts).
+    database: AdventureWorks2014
+    schema: Person
+    loaded_at_field: ModifiedDate
+    freshness:
+      warn_after: {count: 7, period: day}
+    tables:
+      - name: Person
+        description: Individual identities and contact information.
+        columns:
+          - name: BusinessEntityID
+            description: Primary key for the person identity.
+          - name: ModifiedDate
+            description: Date and time the record was last updated (used for freshness).

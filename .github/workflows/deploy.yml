@@ -28,6 +28,7 @@ on:
     branches:
       - develop
       - main
+      - 'feature/**'
   workflow_dispatch:
     inputs:
       environment:
@@ -42,10 +43,10 @@ on:
         description: 'Database mode (external = real server via secrets, container = throwaway SQL Server in the runner)'
         type: choice
         required: true
-        default: external
+        default: container
         options:
-          - external
           - container
+          - external
 
 permissions:
   contents: read
@@ -75,7 +76,7 @@ jobs:
             MODE="${{ github.event.inputs.db-mode }}"
           else
             MODE="${{ vars.DEPLOY_DB_MODE }}"
-            MODE="${MODE:-external}"
+            MODE="${MODE:-container}"
             if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
               ENV="prod"
             else
@@ -116,10 +117,15 @@ jobs:
 
       - name: Install Microsoft ODBC Driver 17 + dbt
         run: |
-          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
-          curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          if ! dpkg -s msodbcsql17 >/dev/null 2>&1; then
+            sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/mssql-release.list
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /usr/share/keyrings/microsoft-prod.gpg
+            echo "deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+            sudo apt-get update
+            sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17
+          fi
           sudo apt-get update
-          sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 unixodbc-dev
+          sudo apt-get install -y --no-install-recommends unixodbc-dev
           pip install dbt-sqlserver==1.8.7
 
       - name: dbt deps
@@ -161,10 +167,15 @@ jobs:
 
       - name: Install Microsoft ODBC Driver 17
         run: |
-          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
-          curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          if ! dpkg -s msodbcsql17 >/dev/null 2>&1; then
+            sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/mssql-release.list
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /usr/share/keyrings/microsoft-prod.gpg
+            echo "deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+            sudo apt-get update
+            sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17
+          fi
           sudo apt-get update
-          sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 unixodbc-dev
+          sudo apt-get install -y --no-install-recommends unixodbc-dev
           pip install pyodbc==4.0.39
 
       - name: Create pre-deployment backup
@@ -219,10 +230,15 @@ jobs:
 
       - name: Install Microsoft ODBC Driver 17 + dbt
         run: |
-          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
-          curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          if ! dpkg -s msodbcsql17 >/dev/null 2>&1; then
+            sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/mssql-release.list
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /usr/share/keyrings/microsoft-prod.gpg
+            echo "deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+            sudo apt-get update
+            sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17
+          fi
           sudo apt-get update
-          sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 unixodbc-dev
+          sudo apt-get install -y --no-install-recommends unixodbc-dev
           pip install dbt-sqlserver==1.8.7
 
       - name: Install DBT dependencies (dbt deps)
@@ -235,7 +251,12 @@ jobs:
 
       - name: Run DBT snapshots (SCD2)
         working-directory: dbt
-        run: dbt snapshot --target "${{ needs.determine-environment.outputs.target }}"
+        run: |
+          if [ -d snapshots ]; then
+            dbt snapshot --target "${{ needs.determine-environment.outputs.target }}"
+          else
+            echo "No snapshots directory found, skipping dbt snapshot."
+          fi
 
       - name: Test data quality (dbt test)
         working-directory: dbt
@@ -266,10 +287,15 @@ jobs:
 
       - name: Install Microsoft ODBC Driver 17 + dbt
         run: |
-          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
-          curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          if ! dpkg -s msodbcsql17 >/dev/null 2>&1; then
+            sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/mssql-release.list
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /usr/share/keyrings/microsoft-prod.gpg
+            echo "deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+            sudo apt-get update
+            sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17
+          fi
           sudo apt-get update
-          sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 unixodbc-dev
+          sudo apt-get install -y --no-install-recommends unixodbc-dev
           pip install dbt-sqlserver==1.8.7
 
       - name: Post-deployment health check (re-run tests)
@@ -342,16 +368,22 @@ jobs:
 
       - name: Install Microsoft ODBC Driver 17 + dbt
         run: |
-          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
-          curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          if ! dpkg -s msodbcsql17 >/dev/null 2>&1; then
+            sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/mssql-release.list
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /usr/share/keyrings/microsoft-prod.gpg
+            echo "deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+            sudo apt-get update
+            sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17
+          fi
           sudo apt-get update
-          sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 unixodbc-dev
+          sudo apt-get install -y --no-install-recommends unixodbc-dev
           pip install dbt-sqlserver==1.8.7
 
       - name: Download AdventureWorks2014 backup
         run: |
           curl -fL -o AdventureWorks2014.bak \
             https://github.com/Microsoft/sql-server-samples/releases/download/adventureworks/AdventureWorks2014.bak
+          chmod 644 AdventureWorks2014.bak
           ls -lh AdventureWorks2014.bak
 
       - name: Restore AdventureWorks2014 into SQL Server service container
@@ -407,7 +439,12 @@ jobs:
 
       - name: dbt snapshot
         working-directory: dbt
-        run: dbt snapshot --target "${{ needs.determine-environment.outputs.target }}"
+        run: |
+          if [ -d snapshots ]; then
+            dbt snapshot --target "${{ needs.determine-environment.outputs.target }}"
+          else
+            echo "No snapshots directory found, skipping dbt snapshot."
+          fi
 
       - name: dbt test
         working-directory: dbt
@@ -467,18 +504,15 @@ jobs:
           fi
           echo "text=$TEXT" >> "$GITHUB_OUTPUT"
 
-      - name: Send Slack notification
-        if: secrets.SLACK_WEBHOOK_URL != ''
+      - name: Send notification (Slack if configured, and GitHub Actions summary)
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          curl -s -X POST -H 'Content-type: application/json' \
-            --data "{\"text\": \"${{ steps.message.outputs.text }}\"}" \
-            "$SLACK_WEBHOOK_URL"
-
-      - name: Fallback notification (GitHub Actions output)
-        if: secrets.SLACK_WEBHOOK_URL == ''
-        run: |
+          if [[ -n "$SLACK_WEBHOOK_URL" ]]; then
+            curl -s -X POST -H 'Content-type: application/json' \
+              --data "{\"text\": \"${{ steps.message.outputs.text }}\"}" \
+              "$SLACK_WEBHOOK_URL"
+          fi
           echo "${{ steps.message.outputs.text }}" >> "$GITHUB_STEP_SUMMARY"
           if [[ "${{ needs.deploy.result }}" != "success" && "${{ needs.deploy-container.result }}" != "success" ]]; then
             echo "::error::${{ steps.message.outputs.text }}"
