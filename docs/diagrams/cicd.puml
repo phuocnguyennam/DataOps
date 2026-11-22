@@ -1,0 +1,30 @@
+@startuml cicd
+!theme plain
+title Quy trình CI/CD — từ nhánh feature đến production
+
+start
+:Developer push nhánh feature/*;
+:Mở Pull Request vào develop;
+:CI (ci.yml) chạy tự động\n• PR validation (title / size / conflict)\n• flake8 + black\n• sqlfluff\n• dbt build + docs generate;
+if (CI xanh?) then (Không)
+    :Sửa lỗi rồi push lại;
+    stop
+else (Có)
+    :Review + Merge vào develop;
+endif
+:CD tự động (deploy.yml, target dev)\ndbt deps → run → snapshot → test;
+:Thông báo + ghi job summary;
+if (Sẵn sàng release?) then (Không)
+    stop
+else (Có)
+    :Merge develop → main;
+endif
+:CD tự động (deploy.yml, target prod)\nbackup → dbt run → test → health check;
+if (Test prod đỏ?) then (Có)
+    :Rollback (rollback.yml)\nstate-aware hoặc full-redeploy;
+else (Không)
+    :Deploy thành công → thông báo + badge;
+endif
+stop
+
+@enduml

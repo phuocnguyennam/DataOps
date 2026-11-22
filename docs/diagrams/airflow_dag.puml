@@ -1,0 +1,27 @@
+@startuml airflow_dag
+!theme plain
+skinparam componentStyle rectangle
+title Airflow DAG — dbt_transform_pipeline (chuỗi quality gate)
+
+component "dbt_deps" as t0
+component "dbt_source_freshness" as t1
+component "dbt_run_bronze" as t2
+component "dbt_test_bronze" as t3
+component "dbt_run_silver" as t4
+component "dbt_test_silver" as t5
+component "dbt_run_gold" as t6
+component "dbt_test_gold" as t7
+component "dbt_test_reconciliation" as t8
+component "dbt_docs_generate" as t9
+
+t0 --> t1 : "cài packages"
+t1 --> t2 : "freshness"
+t2 --> t3 : "run"
+t3 --> t4 : "test (gate 1)"
+t4 --> t5 : "run"
+t5 --> t6 : "test (gate 2)"
+t6 --> t7 : "run"
+t7 --> t8 : "test (gate 3)"
+t8 --> t9 : "đối soát"
+
+@enduml
