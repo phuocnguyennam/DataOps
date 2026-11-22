@@ -25,7 +25,7 @@ dbt_airflow_project:
     dev:
       type: sqlserver
       driver: 'ODBC Driver 17 for SQL Server'
-      server: "{{ env_var('DBT_SQLSERVER_HOST', 'host.docker.internal') }}"
+      server: "{{ env_var('DBT_SQLSERVER_HOST', 'sqlserver') }}"
       port: 1433
       database: "{{ env_var('DBT_SQLSERVER_DATABASE', 'AdventureWorks2014') }}"
       schema: "{{ env_var('DBT_SCHEMA', 'dbo') }}"
@@ -45,7 +45,7 @@ dbt_airflow_project:
     prod:
       type: sqlserver
       driver: 'ODBC Driver 17 for SQL Server'
-      server: "{{ env_var('DBT_SQLSERVER_HOST', 'host.docker.internal') }}"
+      server: "{{ env_var('DBT_SQLSERVER_HOST', 'sqlserver') }}"
       port: 1433
       database: "{{ env_var('DBT_SQLSERVER_DATABASE', 'AdventureWorks2014') }}"
       schema: "{{ env_var('DBT_SCHEMA', 'dbo') }}"
